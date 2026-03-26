@@ -1,79 +1,98 @@
 import matplotlib.pyplot as plt # Plotting Tool
 import pandas as pd
 import numpy as np # Math tool
+import json
+import sys
 
 class RocketSim: 
-    def __init__(self, motor_file):
-        # Physical Constants
-        self.g = 9.81               # Gravitational acceleration (m/s^2)
-        self.rho = 1.225            # Air density at sea level (kg/m^3)
+    def __init__(self, config_path):
+        # Load the configuation file saved by main_gui.py
+        with open(config_path, 'r') as f:
+            config = json.load(f)
 
-        # --- Motor Data loading ---
-        motor_data = pd.read_csv(motor_file, skiprows=4) # skip the first 4 rows
+        # Physical Constants
+        self.g = 9.81
+        self.rho = 1.225
+
+        # --- Motor Data Loading ---
+        # Get the motor file path directly from the GUI input
+        motor_file = config["Motor File"]
+        motor_data = pd.read_csv(motor_file, skiprows=4)
         self.thrust_time = motor_data["Time (s)"].values
         self.thrust_force = motor_data["Thrust (N)"].values
         self.burn_time = self.thrust_time[-1]
         self.total_impulse = np.trapezoid(self.thrust_force, self.thrust_time)
 
-        # Rocket Specs
-        self.mass_dry = 1.00        # kg (Dry mass of the rocket)
-        self.mass_fueled = 0.126    # kg (Mass of the propellant)
+        # Rocket specs from JSON
+        self.mass_dry = float(config["Dry Mass (kg)"])
+        self.mass_fueled = float(config["Propellant Mass (kg)"])
         self.current_fuel_mass = self.mass_fueled
-        self.cd = 0.5               # Drag Coefficient
-        self.area = 0.0005          # Cross Sectional area (m^2)
-        self.cp_dist = 0.6          # Center of preasure
-        self.cg_dist = 0.5          # Center of gravity
-        self.diameter = 0.077       # 77 mm (m)
-        
-        #Launch rail
-        self.rail_length = 2.0
+        self.diameter = float(config["Diameter (m)"])
 
-        # Isp = Total impulse / (Propellant mass * g)
+        # Calculate Cross Sectional area automatically from input diameter
+        self.area = np.pi * (self.diameter / 2)**2 
+        
+        self.cd = 0.5 # Can be moved to GUI later if desired
+        self.cp_dist = float(config["CP Dist (m)"])
+        self.cg_dist = float(config["CG Dist (m)"])
+        self.fin_area = float(config["Fin Area (m\u00b2)"])
+        
+        # Environment & Launch Config
+        self.rail_length = float(config["Rail Length (m)"])
+        self.wind_speed_ms = float(config["Wind Speed (m/s)"])
+
+        # Recovery System from JSON
+        self.parachute_diameter = float(config.get("Chute Dia (m)", 0.74))
+        self.parachute_area = np.pi * (self.parachute_diameter / 2)**2
+        self.parachute_cd = float(config.get("Chute Cd", 1.5))
+        self.parachute_delay = float(config["Chute Delay (s)"])
+        self.target_impact_velocity = 5.0 
+
+        # Calculated Constants
         self.isp = self.total_impulse / (self.mass_fueled * self.g)
 
-        # Simulation Variables
-        self.dt = 0.01              # Time step (seconds)
+        # Simulation State Variables
+        self.dt = 0.01              
         self.time = 0
         self.altitude = 0
-        self.x = 0
-        self.theta = 0
         self.velocity = 0
         self.acceleration = 0
         self.impact_velocity = 0
-        self.target_impact_velocity = 5.0 # m/s (Standard safe landing speed)
         self.decent_time = 0
-        self.parachute_cd = 1.5
-        self.parachute_diameter = 0.74
-        self.parachute_area = np.pi * (self.parachute_diameter / 2)**2
-        self.parachute_delay = 2.0 # Parachute ejection delay
-        self.apogee_time = 0 # Time of apogee, set during time
+        self.apogee_time = 0 
         self.max_shock_force_n = 0
-        self.shock_factor = 1.5 #Multiplier for the "snap" of the parachute
+        self.shock_factor = 1.5 
         self.max_velocity = 0
         self.max_mach = 0
-        self.wind_speed_ms = 5.0 # Assumed wind speed (m/s)
+        self.parachute_deployed = False
 
         # 6-DOF Specific Fields
-        self.fin_area = 0.0059865 # m^2 (From fin model)
-        self.fin_dist_from_nost = 0.9614 # m (Adjust based on actual rocket length)
+        self.fin_dist_from_nost = 0.9614 # Adjusted based on actual rocket length
 
         # Inertia Tensor [Ixx, Iyy, Izz]
         self.I_tensor = np.array([0.094, 0.0008, 0.094])
 
-        # Initial Orientation (quaternion for "Straight Up")
-        # [w, x, y, z] -> [1, 0, 0, 0] is neutral
+        # Initial Orientation
         self.quat = np.array([1.0, 0.0, 0.0, 0.0])
-        self.ang_vel = np.array([0.0, 0.0, 0.0]) # rad/s
+        self.ang_vel = np.array([0.0, 0.0, 0.0]) 
 
-
+        # Data Logging
         self.log = {"t": [], "alt": [], "pos_x": [], "pos_z": [],
                     "vel_m": [], "accel": [], "pitch": [], 
                     "yaw": [], "thrust": [], "fin_x": [], "fin_y": [],
                     "recov_d": []}
-
+    
     def get_thrust(self, t):
         # Numpy interpolation to get rough values for missing  time spots for the exact simulation time
         return np.interp(t, self.thrust_time, self.thrust_force, left=0, right=0)
+
+    def calculate_recovery_drag(self, velocity, altitude):
+        if self.parachute_deployed:
+            rho = self.get_air_density(altitude)
+            # Drag Formula: Fd = 0.5 * rho * v^2 * Cd * A
+            drag_force = 0.5 * rho * (velocity**2) * self.parachute_cd * self.parachute_area
+            return drag_force
+        return 0
 
     def get_air_density (self, altitude):
         # Constant for the standard atmosphere model
@@ -303,7 +322,7 @@ class RocketSim:
             print("ADVICE: Rocket is over stable. It might 'weather cock' (tilt) heavily in wind.")
         else:
             print("SUCCESS: Stability margin is within the safe range (1-2 calibers).")
-    
+
     def run(self):
         print("Running 6-DOF SITL Simulation...")
         sitl = FlightComputerSITL()
@@ -450,6 +469,64 @@ class RocketSim:
         df.to_csv(filename, index=False)
         print(f"\nData saved to {filename}")
 
+def save_report(self):
+        # Convert log to DataFrame to make calculations easier
+        df = pd.DataFrame(self.log)
+        
+        # Recalculate the recovery requirements
+        req_area, req_diam = self.calculate_required_parachute()
+        required_radius = self.decent_time * self.wind_speed_ms
+        force_kgf = self.max_shock_force_n / self.g
+        
+        # Generate Material Advice String
+        if force_kgf < 5:
+            advice = "3mm Elastic/Nylon: Sufficient for light loads."
+        elif 5 <= force_kgf < 15:
+            advice = "150kg-test Kevlar: Recommended. Use a shock absorber loop."
+        else:
+            advice = "350kg-test Kevlar: High load! Reinforce motor tube mount."
+
+        # Generate Stability Status
+        if self.initial_stability_calibers < 1.0:
+            stab_status = "DANGEROUS: Rocket may be unstable! Add nose weight."
+        elif self.initial_stability_calibers > 3.0:
+            stab_status = "WARNING: Overstable. May weathercock heavily."
+        else:
+            stab_status = "SAFE: Stability margin is optimal (1-2 cal)."
+
+        report_data = {
+            # Flight Stats - Explicitly cast to float to avoid numpy errors
+            "Apogee": float(round(self.apogee_altitude, 2)),
+            "Max Velocity": float(round(self.max_velocity, 2)),
+            "Max Mach": float(round(self.max_mach, 2)),
+            "Apogee Time": float(round(self.apogee_time, 2)),
+            "Descent Time": float(round(self.decent_time, 2)),
+            "Burn Time": float(round(self.burn_time, 2)),
+            
+            # Recovery Analysis
+            "Field Diameter": float(round(required_radius * 2, 2)),
+            "Required Chute Dia": float(round(req_diam, 2)),
+            "Impact Velocity": float(round(self.impact_velocity, 2)),
+            "Recovery Success": "Yes" if self.impact_velocity <= self.target_impact_velocity else "No",
+            
+            # Harness Analysis
+            "Max Shock Force N": float(round(self.max_shock_force_n, 2)),
+            "Max Shock Force Kgf": float(round(force_kgf, 2)),
+            "Suggested Cord Strength": float(round(force_kgf * 3, 2)),
+            "Material Advice": advice,
+            
+            # Stability Analysis
+            "CP": float(round(self.cp_dist, 3)),
+            "CG": float(round(self.cg_dist, 3)),
+            "Stability Margin": float(round(self.initial_stability_calibers, 2)),
+            "Stability Status": stab_status
+        }
+
+        # Save to file
+        with open("flight_report.json", "w") as f:
+            json.dump(report_data, f, indent=4)
+        print("Detailed report saved to flight_report.json")
+
 class FlightComputerSITL:
     def __init__(self):
         # PID Constants (Match with real rocket)
@@ -493,8 +570,15 @@ class FlightComputerSITL:
 
         return [delta_1, delta_2, delta_3, delta_4]
 
-sim = RocketSim('AeroTech_F40W.csv')
-sim.run()
-sim.print_report()
-sim.save_to_csv()
-sim.plot()
+if __name__ == "__main__":
+
+    # Check if a config file is passed via command line
+    config_file = sys.argv[1] if len(sys.argv) > 1 else "rocket_config.json"
+
+    sim = RocketSim(config_file)
+    sim.run()
+    sim.print_report()
+    sim.save_to_csv()
+    sim.save_report()
+    # Plotting is disabled in the script itself.
+    #sim.plot()

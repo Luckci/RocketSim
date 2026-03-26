@@ -1,0 +1,17 @@
+{
+    "Total Length (m)": "1.2",
+    "Dry Mass (kg)": "1.0",
+    "Propellant Mass (kg)": "0.126",
+    "Diameter (m)": "0.077",
+    "CP Dist (m)": "0.6",
+    "CG Dist (m)": "0.5",
+    "Fin Area (m\u00b2)": "0.006",
+    "Motor File": "AeroTech_F40W.csv",
+    "Rail Angle (\u00b0)": "90",
+    "Rail Length (m)": "1.5",
+    "Wind Speed (m/s)": "5.0",
+    "Air Density (kg/m\u00b3)": "1.225",
+    "Chute Dia (m)": "0.74",
+    "Chute Cd": "1.5",
+    "Chute Delay (s)": "2.0"
+}
