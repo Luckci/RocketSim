@@ -469,7 +469,7 @@ class RocketSim:
         df.to_csv(filename, index=False)
         print(f"\nData saved to {filename}")
 
-def save_report(self):
+    def save_report(self):
         # Convert log to DataFrame to make calculations easier
         df = pd.DataFrame(self.log)
         

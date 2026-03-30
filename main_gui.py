@@ -5,11 +5,13 @@ import pandas as pd
 import numpy as np
 import os
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QFormLayout, QLineEdit, QPushButton, QLabel, 
-                             QFrame, QCheckBox, QGroupBox, QScrollArea)
+                            QFormLayout, QLineEdit, QPushButton, QLabel, 
+                            QFrame, QCheckBox, QGroupBox, QScrollArea,
+                            QTabWidget, QComboBox)
 from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
 
 MODERN_STYLE = """
 QWidget { background-color: #09090b; color: #a1a1aa; font-family: 'Inter', sans-serif; }
@@ -22,23 +24,87 @@ QLabel#Header { color: white; font-size: 16px; font-weight: 800; }
 """
 
 class MplCanvas(FigureCanvas):
-    def __init__(self):
-        fig = Figure(figsize=(8, 6), facecolor='#09090b')
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        # Create the figure with the specified size
+        fig = Figure(figsize=(width, height), dpi=dpi, facecolor='#09090b')
         self.axes = fig.add_subplot(111)
+        # Set default styling for the axes
         self.axes.set_facecolor('#09090b')
-        self.axes.tick_params(colors='#71717a')
-        self.axes.grid(True, color="#494949")
+        self.axes.tick_params(colors='#a1a1aa')
         super().__init__(fig)
 
 class MissionControl(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RocketSim | Advanced Telemetry")
-        self.resize(1400, 900)
+        self.resize(1200, 800)
         self.setStyleSheet(MODERN_STYLE)
 
-        main_layout = QHBoxLayout(self)
+        # Main Layout
+        self.layout = QVBoxLayout(self)
+
+        # Create Tabs
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("QTabBar::tab { background: #18181b; padding: 10px; min-width: 150px; } "
+                                "QTabBar::tab:selected { background: #3b82f6; color: white; }")
+
+        self.builder_tab = QWidget()
+        self.flight_tab = QWidget()
+
+        self.tabs.addTab(self.builder_tab, "VEHICLE BUILDER")
+        self.tabs.addTab(self.flight_tab, "FLIGHT TELEMETRY")
+
+        self.layout.addWidget(self.tabs)
+
+        self.setup_builder_tab()
+        self.set_flight_tab()
+    
+    def setup_builder_tab(self):
+        layout = QHBoxLayout(self.builder_tab)
         
+        # Component Tree
+        self.controls = QGroupBox("ROCKET ASSEMBLY")
+        self.controls.setFixedWidth(300)
+        self.control_layout = QVBoxLayout()
+
+        # Simple inputs, "modular" comming
+        self.nose_len = QLineEdit("0.15")
+        self.body_len = QLineEdit("0.50")
+        self.body_dia = QLineEdit("0.04")
+
+        # Connect text changes to the drawing engine
+        self.nose_len.textChanged.connect(self.update_schematic)
+        self.body_len.textChanged.connect(self.update_schematic)
+        self.body_dia.textChanged.connect(self.update_schematic)
+
+        self.control_layout.addWidget(QLabel("Nose Length (m)"))
+        self.control_layout.addWidget(self.nose_len)
+        self.control_layout.addWidget(QLabel("Body Length (m)"))
+        self.control_layout.addWidget(self.body_len)
+        self.control_layout.addWidget(QLabel("Diameter (m)"))
+        self.control_layout.addWidget(self.body_dia)
+        self.control_layout.addStretch()
+
+        self.controls.setLayout(self.control_layout)
+
+        # Schematic Canvas
+        self.schematic_canvas = MplCanvas(width=5, height=8)
+
+        # Stability Gauge
+        self.stability_panel = QGroupBox("STABILITY ANALYSIS")
+        self.stability_panel.setFixedWidth(250)
+        self.stab_layout = QVBoxLayout()
+        self.margin_label = QLabel("0.00 CAL")
+        self.margin_label.setStyleSheet("font-size: 30px; font=weight: 900; color: #3b82f6")
+        self.stab_layout.addWidget(self.margin_label)
+        self.stability_panel.setLayout(self.stab_layout)
+
+        layout.addWidget(self.controls)
+        layout.addWidget(self.schematic_canvas, 1)
+        layout.addWidget(self.stability_panel)
+
+    def set_flight_tab(self):
+        layout = QHBoxLayout(self.flight_tab)
         # --- Sidebar with Scroll ---
         sidebar_scroll = QScrollArea()
         sidebar_scroll.setFixedWidth(350)
@@ -118,31 +184,88 @@ class MissionControl(QWidget):
         self.canvas = MplCanvas()
 
         # --- Report panel ---
-        self.report_panel = QGroupBox("FLIGHT SUMMARY")
-        self.report_panel.setFixedWidth(250)
-        self.report_layout = QVBoxLayout()
+        self.report_scroll = QScrollArea()
+        self.report_scroll.setFixedWidth(280)
+        self.report_scroll.setWidgetResizable(True)
 
-        self.stats = {
-            "Apogee": QLabel("0.0 m"),
-            "Max Velocity": QLabel("0.0 m/s"),
-            "Max Acceleration": QLabel("0.0 G"),
-            "Burn Time": QLabel("0.0 s"),
-            "Landing Speed": QLabel("0.0 m/s")
+        report_widget = QWidget()
+        self.report_layout = QVBoxLayout(report_widget)
+
+        self.stats_label = {
+            "Apogee": "Apogee (m)",
+            "Max Velocity": "Max Velocity (m/s)",
+            "Impact Velocity": "Impact Speed (m/s)",
+            "Stability Margin": "Stability (cal)",
+            "Max Shock Force Kgf": "Shock Force (kgf)",
+            "Required Chute Dia": "Req. Chute (m)",
+            "Field Diameter": "Req. Field (m)"
         }
 
-        for name, label in self.stats.items():
-            name_label = QLabel(name)
-            name_label.setStyleSheet("color: #71717a; font-size: 11px; font-weight: bold;")
-            label.setStyleSheet("color: #3b82f6; font-size: 18px; font-weight: 800; margin-bottom: 10px;")
-            self.report_layout.addWidget(name_label)
-            self.report_layout.addWidget(label)
+        self.stats = {} #Dictionary to store the actual QLabel objects
+
+        for key, display_name in self.stats_label.items():
+            title = QLabel(display_name.upper())
+            title.setStyleSheet("color: #71717a; font-size: 10px; font-weight: bold; margin-top: 5px;")
+
+            value_label = QLabel("0.0")
+            value_label.setStyleSheet("color: #3b82f6; font-size: 16px; font-weight: 800;")
+
+            self.stats[key] = value_label
+            self.report_layout.addWidget(title)
+            self.report_layout.addWidget(value_label)
+
+        self.advice_box = QLabel("No flight data yet.")
+        self.advice_box.setWordWrap(True)
+        self.advice_box.setStyleSheet("color: #e2e2e2; font-style: italic; border-top: 1 px solid #27272a; padding-top: 10px;")
+        self.report_layout.addWidget(self.advice_box)
 
         self.report_layout.addStretch()
-        self.report_panel.setLayout(self.report_layout)
-        
-        main_layout.addWidget(sidebar_scroll)
-        main_layout.addWidget(self.canvas, 1)
-        main_layout.addWidget(self.report_panel)
+        self.report_scroll.setWidget(report_widget)
+
+        layout.addWidget(sidebar_scroll)
+        layout.addWidget(self.canvas, 1)
+        layout.addWidget(self.report_scroll)
+
+    def update_schematic(self):
+        try:
+            ax = self.schematic_canvas.axes
+            ax.clear()
+            ax.set_facecolor('#09090b')
+            ax.axis('off')
+
+            # Get Values
+            n_len = float(self.nose_len.text())
+            b_len = float(self.body_len.text())
+            dia = float(self.body_dia.text())
+            radius = dia / 2
+
+            # Draw body tube
+            # Center of rocket is X=0, Bottom is at Y=0
+            body_rect = plt.Rectangle((-radius, 0), dia, b_len,
+                                    color='#27272a', ec='#3b82f6', lw=2)
+            ax.add_patch(body_rect)
+            
+            # Draw nose cone
+            nose_pts = [[-radius, b_len], [radius, b_len], [0, b_len + n_len]]
+            nose_cone = plt.Polygon(nose_pts, color='#3b82f6', ec='white', lw=1)
+            ax.add_patch(nose_cone)
+
+            # Draw fins
+            fin_w = radius * 2
+            fin_h = radius * 1.5
+            left_fin = plt.Polygon([[-radius, 0], [-radius-fin_w, 0], [-radius, fin_h]], color='#3b82f6', alpha=0.8)
+            right_fin = plt.Polygon([[radius, 0], [radius+fin_w, 0], [radius, fin_h]], color='#3b82f6', alpha=0.8)
+            ax.add_patch(left_fin)
+            ax.add_patch(right_fin)
+
+            # Set plot limits so rocket stays centered
+            ax.set_ylim(-0.05, b_len + n_len + 0.1)
+            ax.set_xlim(-0.3, 0.3)
+            ax.set_aspect('equal') 
+
+            self.schematic_canvas.draw()
+        except ValueError:
+            pass # Ignore errors while user is typing
 
     def run_sim(self):
         # Merge all input dicts into one config
@@ -194,14 +317,20 @@ class MissionControl(QWidget):
                 with open("flight_report.json", "r") as f:
                     r = json.load(f)
 
-                # Update your labels or text area
-                report_string = f"Apogee: {r['Apogee']}m\nStability: {r['Stability Status']}"
-                # self.report_display.setText(report_string)
-            else:
-                print("Report file not found yet.")
+                for key in self.stats_label.keys():
+                    if key in r:
+                        self.stats[key].setText(str(r[key]))
 
-            
+                    advice_text = f"ADVICE: {r['Material Advice']}\n\nSTABILITY: {r['Stability Status']}"
+                    self.advice_box.setText(advice_text)
 
+                    # Highlight landing speed in rred if its too high
+                    if r["Impact Velocity"] > 8.0:
+                        self.stats["Impact Velocity"].setStyleSheet("color: #ef4444; font-size: 16px; font-weight: 800;")
+                    else:
+                        self.stats["Impact Velocity"].setStyleSheet("color: #10b981; font-size: 16px; font-weight: 800;")
+
+                self.canvas.draw()
         except Exception as e:
             print(f"Update error: {e}")
 
