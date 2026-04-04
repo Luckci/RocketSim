@@ -7,7 +7,7 @@ import os
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                             QFormLayout, QLineEdit, QPushButton, QLabel, 
                             QFrame, QCheckBox, QGroupBox, QScrollArea,
-                            QTabWidget, QComboBox)
+                            QTabWidget, QComboBox, QDialog, QDialogButtonBox)
 from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -22,6 +22,58 @@ QPushButton { background-color: #1d4ed8; color: white; border-radius: 4px; paddi
 QPushButton#LaunchBtn { background-color: #059669; }
 QLabel#Header { color: white; font-size: 16px; font-weight: 800; }
 """
+
+class RocketComponents:
+    def __init__(self, name, mass, length, part_type):
+        self.name = name
+        self.mass = mass
+        self.length = length
+        self.part_type = part_type # 'nose', 'body', 'fins', etc.
+
+    def get_cg(self, start_y):
+        # Simplification: CG is in the middle of the part
+        return start_y + (self.length / 2)
+
+class PartEditDialog(QDialog):
+    def __init__(self, part_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit {part_data['name']}")
+        self.layout = QFormLayout(self)
+        self.delete_requested = False # Track if we want to kill this part
+
+        self.inputs = {}
+
+        # Dynamically create inputs based on what keys the part has
+        for key, value in part_data.items():
+            if key in ["type", "name"]: continue # Don't edit these
+
+            self.inputs[key] = QLineEdit(str(value))
+            self.layout.addRow(f"{key.capitalize()}:", self.inputs[key])
+
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+        self.delete_btn = QPushButton("DELETE COMPONENT")
+        self.delete_btn.setStyleSheet("background-color: #ef4444; color: white; margin-top: 10px;")
+        self.delete_btn.clicked.connect(self.request_delete)
+        
+        self.layout.addWidget(self.buttons)
+        self.layout.addWidget(self.delete_btn)
+
+    def request_delete(self):
+        self.delete_requested = True
+        self.accept() # Close dialog as Accepted
+    
+    def get_values(self):
+        # Return the updated dictionary
+        results = {}
+        for key, widget in self.inputs.items():
+            try:
+                results[key] = float(widget.text())
+            except:
+                results[key] = widget.text()
+        return results
 
 class MplCanvas(FigureCanvas):
     def __init__(self, parent=None, width=5, height=4, dpi=100):
@@ -56,39 +108,87 @@ class MissionControl(QWidget):
 
         self.layout.addWidget(self.tabs)
 
+        self.rocket_components = []
+
+        # MASTER TEMPLATES
+        self.templates = {
+            "body": {"type": "body", "name": "New Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04},
+            "nose": {"type": "nose", "name": "New Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04},
+            "fins": {"type": "fins", "name": "Aft Fins", "mass": 0.05, "height": 0.1, "width": 0.08},
+            # Future expansion is now easy:
+            # "parachute": {"type": "parachute", "name": "Chute", "mass": 0.02, "diameter": 0.3}
+        }
+
         self.setup_builder_tab()
         self.set_flight_tab()
     
+    def on_part_clicked(self, event):
+        try:
+            # Get the index of the part we clicked
+            idx = int(event.artist.part_index)
+            part = self.rocket_components[idx]
+
+            # Open the Dialog
+            dialog = PartEditDialog(part, self)
+            if dialog.exec():
+
+                if dialog.delete_requested:
+                    self.rocket_components.pop(idx)
+                    print(f"Deleted part at index {idx}")
+                else:
+
+                    # Update the data with the new values from the popup
+                    new_values = dialog.get_values()
+                    self.rocket_components[idx].update(new_values)
+
+                # Refresh the rocket
+                self.update_schematic()
+        except Exception as e:
+            print(f"Click handler error: {e}")
+
+    def add_component(self, part_type):
+        if part_type in self.templates:
+            # .copy() is important so changing one doesnt change them all!
+            new_part = self.templates[part_type].copy()
+            self.rocket_components.append(new_part)
+
+            # Update drawing
+            self.update_schematic()
+            print(f"Modularly added: {part_type}")
+
+            # Eventually add part card to the sidebar
+            #self.refresh_sidebar()
+
     def setup_builder_tab(self):
         layout = QHBoxLayout(self.builder_tab)
-        
-        # Component Tree
-        self.controls = QGroupBox("ROCKET ASSEMBLY")
-        self.controls.setFixedWidth(300)
-        self.control_layout = QVBoxLayout()
 
-        # Simple inputs, "modular" comming
-        self.nose_len = QLineEdit("0.15")
-        self.body_len = QLineEdit("0.50")
-        self.body_dia = QLineEdit("0.04")
+        # --- Left: Component Manager ---
+        self.controls = QGroupBox("CONSTRUCTION KIT")
+        self.controls.setFixedWidth(320)
+        self.control_layout = QHBoxLayout()
 
-        # Connect text changes to the drawing engine
-        self.nose_len.textChanged.connect(self.update_schematic)
-        self.body_len.textChanged.connect(self.update_schematic)
-        self.body_dia.textChanged.connect(self.update_schematic)
+        # A scroll area to hold the "Part Cards"
+        self.part_scroll = QScrollArea()
+        self.part_container = QWidget()
+        self.part_layout = QHBoxLayout(self.part_container)
+        self.part_scroll.setWidget(self.part_container)
+        self.part_scroll.setWidgetResizable(True)
 
-        self.control_layout.addWidget(QLabel("Nose Length (m)"))
-        self.control_layout.addWidget(self.nose_len)
-        self.control_layout.addWidget(QLabel("Body Length (m)"))
-        self.control_layout.addWidget(self.body_len)
-        self.control_layout.addWidget(QLabel("Diameter (m)"))
-        self.control_layout.addWidget(self.body_dia)
-        self.control_layout.addStretch()
+        # Buttons to add new parts
+        self.btn_layout = QHBoxLayout()
+        for p_type in self.templates.keys():
+            btn = QPushButton(f"+ {p_type.capitalize()}")
+            # We use a default argument (t=p_type) to capture the current p_type in the loop
+            btn.clicked.connect(lambda checked, t=p_type: self.add_component(t))
+            self.btn_layout.addWidget(btn)
 
+        self.control_layout.addLayout(self.btn_layout)
+        self.control_layout.addWidget(self.part_scroll)
         self.controls.setLayout(self.control_layout)
-
+        
         # Schematic Canvas
         self.schematic_canvas = MplCanvas(width=5, height=8)
+        self.schematic_canvas.mpl_connect('pick_event', self.on_part_clicked)
 
         # Stability Gauge
         self.stability_panel = QGroupBox("STABILITY ANALYSIS")
@@ -227,45 +327,88 @@ class MissionControl(QWidget):
         layout.addWidget(self.report_scroll)
 
     def update_schematic(self):
+
+        if not self.rocket_components:
+            ax = self.schematic_canvas.axes
+            ax.clear()
+            ax.axis('off')
+            ax.set_facecolor('#09090b')
+            ax.text(0, 0, "NO COMPONENTS", color='gray', ha='center')
+            self.schematic_canvas.draw()
+            return
+
         try:
             ax = self.schematic_canvas.axes
             ax.clear()
             ax.set_facecolor('#09090b')
             ax.axis('off')
 
-            # Get Values
-            n_len = float(self.nose_len.text())
-            b_len = float(self.body_len.text())
-            dia = float(self.body_dia.text())
-            radius = dia / 2
-
-            # Draw body tube
-            # Center of rocket is X=0, Bottom is at Y=0
-            body_rect = plt.Rectangle((-radius, 0), dia, b_len,
-                                    color='#27272a', ec='#3b82f6', lw=2)
-            ax.add_patch(body_rect)
+            current_y = 0
+            self.shapes = []
             
-            # Draw nose cone
-            nose_pts = [[-radius, b_len], [radius, b_len], [0, b_len + n_len]]
-            nose_cone = plt.Polygon(nose_pts, color='#3b82f6', ec='white', lw=1)
-            ax.add_patch(nose_cone)
+            # Loop through the modular components list
+            for i, part in enumerate(self.rocket_components):
+                shape = None
 
-            # Draw fins
-            fin_w = radius * 2
-            fin_h = radius * 1.5
-            left_fin = plt.Polygon([[-radius, 0], [-radius-fin_w, 0], [-radius, fin_h]], color='#3b82f6', alpha=0.8)
-            right_fin = plt.Polygon([[radius, 0], [radius+fin_w, 0], [radius, fin_h]], color='#3b82f6', alpha=0.8)
-            ax.add_patch(left_fin)
-            ax.add_patch(right_fin)
+                if part["type"] == "body":
+                    w = float(part["diameter"])
+                    h = float(part["length"])
+                    # Draw Body Tube
+                    shape = plt.Rectangle((-w/2, current_y), w, h, 
+                                        color='#27272a', ec='#3b82f6', lw=2, picker=True)
+                    current_y += h
+                
+                elif part["type"] == "nose":
+                    w = float(part["diameter"])
+                    h = float(part["length"])
+                    # Draw Nose Cone
+                    pts = [[-w/2, current_y], [w/2, current_y], [0, current_y + h]]
+                    shape = plt.Polygon(pts, color='#3b82f6', ec='white', lw=1, picker=True)
+                    current_y += h
+                
+                elif part["type"] == "fins":
+                    # For fins, we assume they are attatched to the base of the rocket (y=0)
+                    # or possibly stay at current_y if they need to be higher
+                    fw = float(part["width"])
+                    fh = float(part["height"])
 
-            # Set plot limits so rocket stays centered
-            ax.set_ylim(-0.05, b_len + n_len + 0.1)
-            ax.set_xlim(-0.3, 0.3)
-            ax.set_aspect('equal') 
+                    # Get the diameter of the body they attatch to (usually the first body tube)
+                    body_dia = 0.04 # fallback
+                    for p in self.rocket_components:
+                        if p["type"] == "body":
+                            body_dia = float(p["diameter"])
+                            break
+
+                    r = body_dia / 2
+
+                    # Right fin (Trapezoid)
+                    right_pts = [[r, 0], [r + fw, 0], [r + fw*0.7, fh], [r, fh]]
+                    shape_r = plt.Polygon(right_pts, color='#3b82f6', alpha=0.7, picker=True)
+                    shape_r.part_index = r
+                    ax.add_patch(shape_r)
+
+                    # Left fin (mirror of right)
+                    left_pts = [[-r, 0], [-r - fw, 0], [-r - fw*0.7, fh], [-r, fh]]
+                    shape_l = plt.Polygon(left_pts, color='#3b82f6', alpha=0.7, picker=True)
+                    shape_l.part_index = 1
+                    ax.add_patch(shape_l)
+
+                    # Dont increment current_y for fins as they dont add hieght to the stack
+                    continue
+
+                if shape:
+                    shape.part_index = i # Tag for the click handler
+                    ax.add_patch(shape)
+            
+            # Set plot limits
+            ax.set_ylim(-0.05, current_y + 0.2)
+            ax.set_xlim(-0.5, 0.5)
+            ax.set_aspect('equal')
 
             self.schematic_canvas.draw()
-        except ValueError:
-            pass # Ignore errors while user is typing
+
+        except (ValueError, KeyError, IndexError) as e:
+            print(f"Drawing error: {e}")
 
     def run_sim(self):
         # Merge all input dicts into one config
