@@ -39,16 +39,23 @@ class PartEditDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Edit {part_data['name']}")
         self.layout = QFormLayout(self)
+        self.parent_ui = parent
         self.delete_requested = False # Track if we want to kill this part
 
         self.inputs = {}
 
         # Dynamically create inputs based on what keys the part has
         for key, value in part_data.items():
-            if key in ["type", "name"]: continue # Don't edit these
+            if key in ["type", "name"]: continue
 
             self.inputs[key] = QLineEdit(str(value))
             self.layout.addRow(f"{key.capitalize()}:", self.inputs[key])
+
+        if part_data["type"] == "motor":
+            self.motor_btn = QPushButton("BROWSE MOTOR DATABASE")
+            self.motor_btn.setStyleSheet("background-color: #3b82f6; color: white; margin-bottom: 10px;")
+            self.motor_btn.clicked.connect(self.open_motor_browser)
+            self.layout.addRow("Selection", self.motor_btn)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
@@ -60,6 +67,18 @@ class PartEditDialog(QDialog):
         
         self.layout.addWidget(self.buttons)
         self.layout.addWidget(self.delete_btn)
+
+    def open_motor_browser(self):
+        browser = MotorSelectorDialog(self)
+        if browser.exec():
+            name, data = browser.get_selected_motor()
+            # Update the text box in the dialog immediately
+            if "motor_id" in self.inputs:
+                self.inputs["motor_id"].setText(name)
+            if "propellant_mass" in self.inputs:
+                self.inputs["propellant_mass"].setText(str(data["prop_mass"]))
+            if "mass" in self.inputs:
+                self.inputs["mass"].setText(str(data["mass"]))
 
     def request_delete(self):
         self.delete_requested = True
@@ -85,6 +104,35 @@ class MplCanvas(FigureCanvas):
         self.axes.tick_params(colors='#a1a1aa')
         super().__init__(fig)
 
+class MotorSelectorDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Rocket Motor")
+        self.setMinimumWidth(400)
+        layout = QVBoxLayout(self)
+
+        self.label = QLabel("Available Motors (Local Library):")
+        layout.addWidget(self.label)
+
+        # The List of Motors
+        self.motor_list = QComboBox()
+        # Mock data, will be replaced with ThrustCurve API
+        self.motors = {
+            "Estes D12-5": {"mass": 0.042, "prop_mass": 0.021, "avg_thrust": 12.0},
+            "Estes E12-6": {"mass": 0.058, "prop_mass": 0.035, "avg_thrust": 12.0},
+            "Cesaroni F15": {"mass": 0.120, "prop_mass": 0.060, "avg_thrust": 15.0}
+        }
+        self.motor_list.addItems(self.motors.keys())
+        layout.addWidget(self.motor_list)
+
+        self.select_btn = QPushButton("Select Motor")
+        self.select_btn.clicked.connect(self.accept)
+        layout.addWidget(self.select_btn)
+
+    def get_selected_motor(self):
+        name = self.motor_list.currentText()
+        return name, self.motors[name]
+
 class MissionControl(QWidget):
     def __init__(self):
         super().__init__()
@@ -109,12 +157,21 @@ class MissionControl(QWidget):
         self.layout.addWidget(self.tabs)
 
         self.rocket_components = []
+        self.current_edit_idx = None
 
         # MASTER TEMPLATES
         self.templates = {
             "body": {"type": "body", "name": "New Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04},
             "nose": {"type": "nose", "name": "New Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04},
             "fins": {"type": "fins", "name": "Aft Fins", "mass": 0.05, "height": 0.1, "width": 0.08},
+            "motor": {
+                "type": "motor", 
+                "name": "Motor Mount", 
+                "mass": 0.05, 
+                "length": 0.1, 
+                "diameter": 0.029, 
+                "motor_id": "None Selected", 
+                "propellant_mass": 0.0}
             # Future expansion is now easy:
             # "parachute": {"type": "parachute", "name": "Chute", "mass": 0.02, "diameter": 0.3}
         }
@@ -126,6 +183,7 @@ class MissionControl(QWidget):
         try:
             # Get the index of the part we clicked
             idx = int(event.artist.part_index)
+            self.current_edit_idx = idx
             part = self.rocket_components[idx]
 
             # Open the Dialog
@@ -384,17 +442,28 @@ class MissionControl(QWidget):
                     # Right fin (Trapezoid)
                     right_pts = [[r, 0], [r + fw, 0], [r + fw*0.7, fh], [r, fh]]
                     shape_r = plt.Polygon(right_pts, color='#3b82f6', alpha=0.7, picker=True)
-                    shape_r.part_index = r
+                    shape_r.part_index = i
                     ax.add_patch(shape_r)
 
                     # Left fin (mirror of right)
                     left_pts = [[-r, 0], [-r - fw, 0], [-r - fw*0.7, fh], [-r, fh]]
                     shape_l = plt.Polygon(left_pts, color='#3b82f6', alpha=0.7, picker=True)
-                    shape_l.part_index = 1
+                    shape_l.part_index = i
                     ax.add_patch(shape_l)
 
                     # Dont increment current_y for fins as they dont add hieght to the stack
                     continue
+
+                elif part["type"] == "motor":
+                    w = float(part["diameter"])
+                    h = float(part["length"])
+                    # Draw motor (starts slightly above 0 to ensure its in the tube)
+                    shape = plt.Rectangle((-w/2, 0.01), w, h,
+                                        color='#52525b', ec='#a1a1aa', lw=1, picker=True)
+                    
+                    # Add text label for the motor ID
+                    ax.text(0, 0.01 + h/2, part["motor_id"], color='white',
+                            ha='center', va='center', fontsize=7, fontweight='bold')
 
                 if shape:
                     shape.part_index = i # Tag for the click handler
