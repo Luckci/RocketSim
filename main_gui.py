@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                             QFormLayout, QLineEdit, QPushButton, QLabel, 
                             QFrame, QCheckBox, QGroupBox, QScrollArea,
                             QTabWidget, QComboBox, QDialog, QDialogButtonBox,
-                            QGridLayout)
+                            QGridLayout, QFileDialog)
 from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -47,7 +47,7 @@ class PartEditDialog(QDialog):
 
         # Dynamically create inputs based on what keys the part has
         for key, value in part_data.items():
-            if key in ["type", "name"]: continue
+            if key in ["type"]: continue
 
             self.inputs[key] = QLineEdit(str(value))
             self.layout.addRow(f"{key.capitalize()}:", self.inputs[key])
@@ -57,6 +57,11 @@ class PartEditDialog(QDialog):
             self.motor_btn.setStyleSheet("background-color: #3b82f6; color: white; margin-bottom: 10px;")
             self.motor_btn.clicked.connect(self.open_motor_browser)
             self.layout.addRow("Selection", self.motor_btn)
+        
+        elif part_data["type"] == "fins":
+            help_text = QLabel("<small>Format: (x1,y1), (x2,y2), (x3,y3), (x4,y4)<br>"
+                            "Starts from the bottom-inner corner.</small>")
+            self.layout.addRow(help_text)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
@@ -144,6 +149,22 @@ class MissionControl(QWidget):
         # Main Layout
         self.layout = QVBoxLayout(self)
 
+        # Toolbar
+        self.toolbar = QHBoxLayout()
+        self.save_btn = QPushButton("💾 SAVE PROJECT")
+        self.load_btn = QPushButton("📂 LOAD PROJECT")
+        self.save_btn.setStyleSheet("background-color: #27272a; padding: 5px;")
+        self.load_btn.setStyleSheet("background-color: #27272a; padding: 5px;")
+        
+        self.save_btn.clicked.connect(self.save_project)
+        self.load_btn.clicked.connect(self.load_project)
+        
+        self.toolbar.addWidget(QLabel("<b>ROCKETSIM PRO</b>"))
+        self.toolbar.addStretch()
+        self.toolbar.addWidget(self.load_btn)
+        self.toolbar.addWidget(self.save_btn)
+        self.layout.addLayout(self.toolbar)
+
         # Create Tabs
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("QTabBar::tab { background: #18181b; padding: 10px; min-width: 150px; } "
@@ -162,17 +183,10 @@ class MissionControl(QWidget):
 
         # MASTER TEMPLATES
         self.templates = {
-            "body": {"type": "body", "name": "New Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04},
-            "nose": {"type": "nose", "name": "New Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04},
-            "fins": {"type": "fins", "name": "Aft Fins", "mass": 0.05, "height": 0.1, "width": 0.08},
-            "motor": {
-                "type": "motor", 
-                "name": "Motor Mount", 
-                "mass": 0.05, 
-                "length": 0.1, 
-                "diameter": 0.029, 
-                "motor_id": "None Selected", 
-                "propellant_mass": 0.0}
+            "body": {"type": "body", "name": "Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04, "y_offset": 0.0},
+            "nose": {"type": "nose", "name": "Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04, "y_offset": 0.3},
+            "fins": {"type": "fins", "name": "Fins", "mass": 0.05, "points": "(0,0), (0.1,0), (0.07,0.08), (0,0.08)", "y_offset": 0.0},
+            "motor": {"type": "motor", "name": "Motor", "mass": 0.05, "length": 0.1, "diameter": 0.029, "motor_id": "None", "y_offset": 0.01}
             # Future expansion is now easy:
             # "parachute": {"type": "parachute", "name": "Chute", "mass": 0.02, "diameter": 0.3}
         }
@@ -216,9 +230,6 @@ class MissionControl(QWidget):
             self.refresh_sidebar()
             print(f"Modularly added: {part_type}")
 
-            # Eventually add part card to the sidebar
-            #self.refresh_sidebar()
-
     def refresh_sidebar(self):
         # Clear the existing widgets in the list
         while self.part_list_layout.count():
@@ -227,8 +238,12 @@ class MissionControl(QWidget):
             if widget:
                 widget.deleteLater()
 
+        # List of (index, part) sorted by y_offset decending
+        indexed_parts = list(enumerate(self.rocket_components))
+        sorted_parts = sorted(indexed_parts, key=lambda x: float(x[1].get('y_offset', 0)), reverse=True)
+
         # Rebuild the list from rocket_components
-        for i, part in enumerate(self.rocket_components):
+        for i, part in sorted_parts:
             # Create a frame for the "card"
             card = QFrame()
             card.setStyleSheet("""
@@ -474,66 +489,64 @@ class MissionControl(QWidget):
 
             current_y = 0
             self.shapes = []
+            max_height = 0
             
             # Loop through the modular components list
             for i, part in enumerate(self.rocket_components):
+                y0 = float(part.get("y_offset", 0))
+                w = float(part.get("diameter", 0.04))
+                h = float(part.get("length", 0))
+
+                max_height = max(max_height, y0 + h)
+
                 shape = None
 
                 if part["type"] == "body":
-                    w = float(part["diameter"])
-                    h = float(part["length"])
                     # Draw Body Tube
-                    shape = plt.Rectangle((-w/2, current_y), w, h, 
+                    shape = plt.Rectangle((-w/2, y0), w, h, 
                                         color='#27272a', ec='#3b82f6', lw=2, picker=True)
                     current_y += h
                 
                 elif part["type"] == "nose":
-                    w = float(part["diameter"])
-                    h = float(part["length"])
                     # Draw Nose Cone
-                    pts = [[-w/2, current_y], [w/2, current_y], [0, current_y + h]]
+                    pts = [[-w/2, y0], [w/2, y0], [0, y0 + h]]
                     shape = plt.Polygon(pts, color='#3b82f6', ec='white', lw=1, picker=True)
-                    current_y += h
                 
                 elif part["type"] == "fins":
-                    # For fins, we assume they are attatched to the base of the rocket (y=0)
-                    # or possibly stay at current_y if they need to be higher
-                    fw = float(part["width"])
-                    fh = float(part["height"])
+                    try:
+                        # Convert the string "(0,0), (0.1,0)..." into a list
+                        raw_pts = eval(f"[{part['points']}]")
 
-                    # Get the diameter of the body they attatch to (usually the first body tube)
-                    body_dia = 0.04 # fallback
-                    for p in self.rocket_components:
-                        if p["type"] == "body":
-                            body_dia = float(p["diameter"])
-                            break
+                        body_dia = 0.04
+                        for p in self.rocket_components:
+                            if p["type"] == "body":
+                                body_dia = float(p["diameter"])
+                                break
+                        r = body_dia / 2
 
-                    r = body_dia / 2
+                        # Calculate Right Fin Points (Offset by radius)
+                        right_pts = [[p[0] + r, p[1] + y0] for p in raw_pts]
+                        # Calculate Left Fin Points (Mirrored)
+                        left_pts = [[-p[0] - r, p[1] + y0] for p in raw_pts]
 
-                    # Right fin (Trapezoid)
-                    right_pts = [[r, 0], [r + fw, 0], [r + fw*0.7, fh], [r, fh]]
-                    shape_r = plt.Polygon(right_pts, color='#3b82f6', alpha=0.7, picker=True)
-                    shape_r.part_index = i
-                    ax.add_patch(shape_r)
+                        shape_r = plt.Polygon(right_pts, color='#3b82f6', alpha=0.7, picker=True)
+                        shape_l = plt.Polygon(left_pts, color='#3b82f6', alpha=0.7, picker=True)
 
-                    # Left fin (mirror of right)
-                    left_pts = [[-r, 0], [-r - fw, 0], [-r - fw*0.7, fh], [-r, fh]]
-                    shape_l = plt.Polygon(left_pts, color='#3b82f6', alpha=0.7, picker=True)
-                    shape_l.part_index = i
-                    ax.add_patch(shape_l)
-
-                    # Dont increment current_y for fins as they dont add hieght to the stack
+                        shape_r.part_index = i
+                        shape_l.part_index = i
+                        ax.add_patch(shape_r)
+                        ax.add_patch(shape_l)
+                    except Exception as e:
+                        print(f"Fin geometry error: {e}")
                     continue
 
                 elif part["type"] == "motor":
-                    w = float(part["diameter"])
-                    h = float(part["length"])
                     # Draw motor (starts slightly above 0 to ensure its in the tube)
                     shape = plt.Rectangle((-w/2, 0.01), w, h,
                                         color='#52525b', ec='#a1a1aa', lw=1, picker=True)
                     
                     # Add text label for the motor ID
-                    ax.text(0, 0.01 + h/2, part["motor_id"], color='white',
+                    ax.text(0, y0 + h/2, part["motor_id"], color='white',
                             ha='center', va='center', fontsize=7, fontweight='bold')
 
                 if shape:
@@ -541,7 +554,7 @@ class MissionControl(QWidget):
                     ax.add_patch(shape)
             
             # Set plot limits
-            ax.set_ylim(-0.05, current_y + 0.2)
+            ax.set_ylim(-0.05, max_height + 0.1)
             ax.set_xlim(-0.5, 0.5)
             ax.set_aspect('equal')
 
@@ -619,6 +632,64 @@ class MissionControl(QWidget):
 
     def launch_3d(self):
         subprocess.Popen([sys.executable, "visualizer.py"])
+
+    def save_project(self):
+        builder_data = self.rocket_components
+
+        flight_data = {
+            "geom": {k: w.text() for k, w in self.inputs.items()},
+            "env": {k: w.text() for k, w in self.env_inputs.items()},
+            "rec": {k: w.text() for k, w in self.rec_inputs.items()}
+        }
+
+        # Combine
+        project_file = {
+            "builder": builder_data,
+            "flight_config": flight_data
+        }
+
+        # Open Save Dialog
+        path, _ = QFileDialog.getSaveFileName(self, "Save Rocket Project", "", "RocketSim Files (*.rkt)")
+
+        if path:
+            with open(path, "w") as f:
+                json.dump(project_file, f, indent=4)
+            print(f"Project saved to {path}")
+
+    def load_project(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Open Rocket Project", "", "RocketSim Files (*.rkt)")
+
+        if path:
+            with open(path, "r") as f:
+                data = json.load(f)
+
+            # Restore builder
+            self.rocket_components = data.get("builder", [])
+            self.update_schematic()
+            self.refresh_sidebar()
+
+            # Restore flight Tab
+            f_config = data.get("flight_config", {})
+            for k, val in f_config.get("geom", {}).items():
+                if k in self.inputs: self.inputs[k].setText(val)
+            for k, val in f_config.get("env", {}).items():
+                if k in self.env_inputs: self.env_inputs[k].setText(val)
+            for k, val in f_config.get("rec", {}).items():
+                if k in self.rec_inputs: self.rec_inputs[k].setText(val)
+
+            print(f"Project loaded from {path}")
+
+    def sync_builder_to_flight(self):
+        total_mass = sum(float(p.get('mass', 0)) + float(p.get('propellant_mass', 0)) for p in self.rocket_components)
+        max_len = 0
+        if self.rocket_components:
+            # Simple length calc: finds the highest point
+            max_len = max(float(p.get('y_offset', 0)) + float(p.get('length', 0)) for p in self.rocket_components)
+
+        # Update the flight tab fields automatically
+        self.inputs["Dry Mass (kg)"].setText(f"{total_mass:.3f}")
+        self.inputs["Total Length (m)"].setText(f"{max_len:.3f}")
+        print("Flight parameters updated from builder!")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
