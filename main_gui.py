@@ -7,7 +7,8 @@ import os
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                             QFormLayout, QLineEdit, QPushButton, QLabel, 
                             QFrame, QCheckBox, QGroupBox, QScrollArea,
-                            QTabWidget, QComboBox, QDialog, QDialogButtonBox)
+                            QTabWidget, QComboBox, QDialog, QDialogButtonBox,
+                            QGridLayout)
 from PyQt6.QtCore import Qt
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -18,7 +19,7 @@ QWidget { background-color: #09090b; color: #a1a1aa; font-family: 'Inter', sans-
 QGroupBox { border: 1px solid #27272a; border-radius: 8px; margin-top: 20px; padding-top: 10px; font-weight: bold; color: #f4f4f5; }
 QLineEdit { background: transparent; border: none; border-bottom: 1px solid #27272a; padding: 4px; color: #3b82f6; font-weight: bold; }
 QLineEdit:focus { border-bottom: 2px solid #3b82f6; }
-QPushButton { background-color: #1d4ed8; color: white; border-radius: 4px; padding: 10px; font-weight: bold; }
+QPushButton { background-color: #1d4ed8; color: white; border-radius: 4px; padding: 8px; font-size: 11px; }
 QPushButton#LaunchBtn { background-color: #059669; }
 QLabel#Header { color: white; font-size: 16px; font-weight: 800; }
 """
@@ -183,7 +184,7 @@ class MissionControl(QWidget):
         try:
             # Get the index of the part we clicked
             idx = int(event.artist.part_index)
-            self.current_edit_idx = idx
+            self.open_edit_dialog_by_index(idx)
             part = self.rocket_components[idx]
 
             # Open the Dialog
@@ -212,10 +213,67 @@ class MissionControl(QWidget):
 
             # Update drawing
             self.update_schematic()
+            self.refresh_sidebar()
             print(f"Modularly added: {part_type}")
 
             # Eventually add part card to the sidebar
             #self.refresh_sidebar()
+
+    def refresh_sidebar(self):
+        # Clear the existing widgets in the list
+        while self.part_list_layout.count():
+            item = self.part_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        # Rebuild the list from rocket_components
+        for i, part in enumerate(self.rocket_components):
+            # Create a frame for the "card"
+            card = QFrame()
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: #1d1d20;
+                    border: 1px solid #27272a;
+                    border-radius: 6px;
+                    margin-bottom: 2px;
+                }
+                QFrame:hover {border: 1px solid #3b82f6; }
+            """)
+            card_layout = QHBoxLayout(card)
+
+            # Label with part name and type
+            name_label = QLabel(f"<b>{part['name']}<b><br><small>{part['type'].upper()}</small>")
+            name_label.setStyleSheet("border: none; color:#f4f4f5;")
+            card_layout.addWidget(name_label)
+
+            # Edit Button (Icon-style)
+            edit_btn = QPushButton("✎")
+            edit_btn.setFixedSize(30, 30)
+            edit_btn.setStyleSheet("background: #27272a; padding: 0;")
+            # Connect the button to the same click logic as the plot!
+            edit_btn.clicked.connect(lambda checked, idx=i: self.open_edit_dialog_by_index(idx))
+            
+            card_layout.addWidget(edit_btn)
+            self.part_list_layout.addWidget(card)
+
+    def open_edit_dialog_by_index(self, idx):
+        try:
+            self.current_edit_idx = idx
+            part = self.rocket_components[idx]
+
+            dialog = PartEditDialog(part, self)
+            if dialog.exec():
+                if dialog.delete_requested:
+                    self.rocket_components.pop(idx)
+                else:
+                    new_values = dialog.get_values()
+                    self.rocket_components[idx].update(new_values)
+
+                self.update_schematic()
+                self.refresh_sidebar() # Refresh the list after editing/deleting
+        except Exception as e:
+            print(f"Dialog error: {e}")
 
     def setup_builder_tab(self):
         layout = QHBoxLayout(self.builder_tab)
@@ -223,26 +281,39 @@ class MissionControl(QWidget):
         # --- Left: Component Manager ---
         self.controls = QGroupBox("CONSTRUCTION KIT")
         self.controls.setFixedWidth(320)
-        self.control_layout = QHBoxLayout()
+        self.control_layout = QVBoxLayout(self.controls)
 
-        # A scroll area to hold the "Part Cards"
-        self.part_scroll = QScrollArea()
-        self.part_container = QWidget()
-        self.part_layout = QHBoxLayout(self.part_container)
-        self.part_scroll.setWidget(self.part_container)
-        self.part_scroll.setWidgetResizable(True)
+        # Dynamic Button Grid
+        self.btn_container = QWidget()
+        self.btn_grid = QGridLayout(self.btn_container)
+        self.btn_grid.setContentsMargins(0,5,0,5)
+        self.btn_grid.setSpacing(8)
 
-        # Buttons to add new parts
-        self.btn_layout = QHBoxLayout()
-        for p_type in self.templates.keys():
+        # Loop though templates and arrange in 2 columns
+        for i, p_type in enumerate(self.templates.keys()):
             btn = QPushButton(f"+ {p_type.capitalize()}")
-            # We use a default argument (t=p_type) to capture the current p_type in the loop
+            btn.setMinimumHeight(40)
             btn.clicked.connect(lambda checked, t=p_type: self.add_component(t))
-            self.btn_layout.addWidget(btn)
 
-        self.control_layout.addLayout(self.btn_layout)
+            row = i // 2
+            col = i % 2
+            self.btn_grid.addWidget(btn, row, col)
+
+            self.control_layout.addWidget(self.btn_container)
+
+        self.control_layout.addWidget(QLabel("ACTIVE COMPONENTS:"))
+
+        self.part_scroll = QScrollArea()
+        self.part_scroll.setWidgetResizable(True)
+        self.part_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.part_scroll.setStyleSheet("background: #18181b; border-radius: 5px;")
+
+        self.part_container = QWidget()
+        self.part_list_layout = QVBoxLayout(self.part_container)
+        self.part_list_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.part_scroll.setWidget(self.part_container)
+        
         self.control_layout.addWidget(self.part_scroll)
-        self.controls.setLayout(self.control_layout)
         
         # Schematic Canvas
         self.schematic_canvas = MplCanvas(width=5, height=8)
