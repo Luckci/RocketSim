@@ -3,6 +3,17 @@ import pandas as pd
 import numpy as np # Math tool
 import json
 import sys
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Utility function to get paths easily
+def get_path(subfolder, filename):
+    return os.path.join(BASE_DIR, subfolder, filename)
+
+DIRS = ["data", "motors", "assets/models", "assets/textures", "config"]
+for d in DIRS:
+    os.makedirs(d, exist_ok=True)
 
 class RocketSim: 
     def __init__(self, config_path):
@@ -17,7 +28,9 @@ class RocketSim:
         # --- Motor Data Loading ---
         # Get the motor file path directly from the GUI input
         motor_file = config["Motor File"]
-        motor_data = pd.read_csv(motor_file, skiprows=4)
+        motor_path = os.path.join(BASE_DIR, "motors", motor_file)
+
+        motor_data = pd.read_csv(motor_path, skiprows=4)
         self.thrust_time = motor_data["Time (s)"].values
         self.thrust_force = motor_data["Thrust (N)"].values
         self.burn_time = self.thrust_time[-1]
@@ -465,13 +478,16 @@ class RocketSim:
         plt.show()
 
     def save_to_csv(self, filename="flight_data.csv"):
+        target_path = os.path.join(BASE_DIR, "data", filename)
         df = pd.DataFrame(self.log)
-        df.to_csv(filename, index=False)
-        print(f"\nData saved to {filename}")
+        df.to_csv(target_path, index=False)
+        print(f"\nData saved to {target_path}")
 
     def save_report(self):
         # Convert log to DataFrame to make calculations easier
         df = pd.DataFrame(self.log)
+
+        report_path = os.path.join(BASE_DIR, "data", "flight_report.json")
         
         # Recalculate the recovery requirements
         req_area, req_diam = self.calculate_required_parachute()
@@ -523,7 +539,7 @@ class RocketSim:
         }
 
         # Save to file
-        with open("flight_report.json", "w") as f:
+        with open(report_path, "w") as f:
             json.dump(report_data, f, indent=4)
         print("Detailed report saved to flight_report.json")
 

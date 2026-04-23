@@ -1,11 +1,25 @@
 from ursina import *
 import pandas as pd
 import random
+import os
+from pathlib import Path
 
 app = Ursina()
 
+BASE_DIR = Path(__file__).resolve().parent
+
+# We tell Ursina: "The assets are here"
+application.asset_folder = BASE_DIR 
+
+# DATA LOADING
+DATA_PATH = BASE_DIR / "data" / "flight_data.csv"
+if not DATA_PATH.exists():
+    print(f"ERROR: Data file not found at {DATA_PATH}")
+else:
+    data = pd.read_csv(str(DATA_PATH))
+
+
 # DATA & STATE
-data = pd.read_csv("flight_data.csv")
 countdown_start = -3.0
 sim_time = countdown_start
 max_flight_time = data['t'].max()
@@ -24,7 +38,8 @@ Sky = Sky()
 
 # ROCKET
 rocket = Entity(
-    model='rocket.obj',
+    model = 'assets/models/rocket.obj',
+    texture = 'assets/textures/rocket_skin.png',
     color=color.black,
     scale=1,
     origin_y=-0.4
@@ -54,11 +69,10 @@ ground_spill = Entity(
 
 # Launch Rail
 Launch_rail = Entity(
-    model='Launch_Rail.obj',
-    texture='metal',
-    position=(0.1,0.01,0.1),
-    rotation_y=(15),
-    scale=1
+    model = 'assets/models/Launch_Rail.obj',
+    texture = 'assets/textures/metal.jpg',
+    position = (0.1, 0.01, 0),
+    scale = 1
 )
 Launch_rail.rotation_z = 90 - 89
 

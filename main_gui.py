@@ -24,6 +24,12 @@ QPushButton#LaunchBtn { background-color: #059669; }
 QLabel#Header { color: white; font-size: 16px; font-weight: 800; }
 """
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Utility function to get paths easily
+def get_path(subfolder, filename):
+    return os.path.join(BASE_DIR, subfolder, filename)
+
 class RocketComponents:
     def __init__(self, name, mass, length, part_type):
         self.name = name
@@ -592,7 +598,9 @@ class MissionControl(QWidget):
 
     def update_graph(self):
         try:
-            df = pd.read_csv("flight_data.csv")
+            df_path = os.path.join(BASE_DIR, "data", "flight_data.csv")
+            report_path = os.path.join(BASE_DIR, "data", "flight_report.json")
+            df = pd.read_csv(df_path)
             self.canvas.axes.clear()
             self.canvas.axes.grid(True, color='#494949', alpha=0.5)
             
@@ -609,8 +617,8 @@ class MissionControl(QWidget):
             self.canvas.draw()
 
             # Update Report Panel
-            if os.path.exists("flight_report.json"):
-                with open("flight_report.json", "r") as f:
+            if os.path.exists(report_path):
+                with open(report_path, "r") as f:
                     r = json.load(f)
 
                 for key in self.stats_label.keys():
