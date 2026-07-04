@@ -102,14 +102,21 @@ The visualizer expects `data/flight_data.csv` to already exist.
 
 ### Vehicle Builder tab
 - Add/edit/remove modular components (`body`, `nose`, `fins`, `motor`)
-- Draw and inspect a simple rocket schematic
+- Draw and inspect a simple rocket schematic (click a part to edit it)
+- Live stability gauge (static margin in calibers, color-coded)
+- `SYNC TO FLIGHT CONFIG` estimates dry mass, length, CG (mass-weighted),
+  CP (simplified Barrowman from nose + fins), fin area and diameter from the
+  parts and pushes them into the Flight Telemetry config
 - Save/load full projects as `.rkt`
 
 ### Flight Telemetry tab
-- Configure flight parameters
-- Run simulation from inside the app
-- Plot selected telemetry curves
-- See summary report values and advice pulled from `data/flight_report.json`
+- Configure flight parameters (tooltips explain every field and its units)
+- Browse real motor thrust curves from `motors/` (avg/peak thrust, burn time, impulse)
+- Run simulation from inside the app without freezing the UI; errors are shown in the status bar
+- Plot selected telemetry curves (altitude, velocity, acceleration, thrust, pitch/yaw, fin angle)
+  with a chute-deploy marker
+- See a color-coded run summary (recovery pass/fail, stability band) and the grouped
+  safety report pulled from `data/flight_report.json`
 
 ## Visualizer Controls
 
@@ -127,9 +134,12 @@ In the 3D viewer (`visualizer.py`):
 - `CP Dist (m)`
 - `CG Dist (m)`
 - `Fin Area (m²)`
+- `Drag Coefficient` (optional, defaults to 0.5)
 - `Motor File`
+- `Rail Angle (°)` (90 = vertical)
 - `Rail Length (m)`
 - `Wind Speed (m/s)`
+- `Air Density (kg/m³)` (sea-level reference)
 - `Chute Dia (m)`
 - `Chute Cd`
 - `Chute Delay (s)`
@@ -183,7 +193,7 @@ Printed flight safety and recovery analysis from `main.py`.
 
 - The current control model is simplified and intended for simulation/testing, not flight certification
 - The visualizer is a playback tool of recorded data, not a live physics engine
-- Some GUI fields are currently informational and not fully used by the simulation core
+- The Barrowman CP estimate is the simplified nose+fins form (no body-lift or transition terms)
 
 ## Troubleshooting
 

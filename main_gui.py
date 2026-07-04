@@ -31,10 +31,11 @@ VISUALIZER_PY = os.path.join(BASE_DIR, "visualizer.py")
 FLIGHT_CSV = os.path.join(DATA_DIR, "flight_data.csv")
 FLIGHT_REPORT = os.path.join(DATA_DIR, "flight_report.json")
 
-# The 15 keys that main.py depends on, in order. Must be written exactly.
+# The keys that main.py depends on, in order. The original 15 must be written
+# exactly; "Drag Coefficient" is optional (main.py defaults it to 0.5).
 CONFIG_KEYS = [
     "Total Length (m)", "Dry Mass (kg)", "Propellant Mass (kg)", "Diameter (m)",
-    "CP Dist (m)", "CG Dist (m)", "Fin Area (m²)", "Motor File",
+    "CP Dist (m)", "CG Dist (m)", "Fin Area (m²)", "Drag Coefficient", "Motor File",
     "Rail Angle (°)", "Rail Length (m)", "Wind Speed (m/s)", "Air Density (kg/m³)",
     "Chute Dia (m)", "Chute Cd", "Chute Delay (s)",
 ]
@@ -48,6 +49,7 @@ TOOLTIPS = {
     "CP Dist (m)": "Centre of Pressure distance from the nose tip (m).",
     "CG Dist (m)": "Centre of Gravity distance from the nose tip (m).",
     "Fin Area (m²)": "Total exposed planform area of one fin set (square metres).",
+    "Drag Coefficient": "Airframe drag coefficient. Typical slender model rocket: 0.4-0.6.",
     "Motor File": "Thrust-curve CSV in the motors/ folder. Use BROWSE MOTORS to pick.",
     "Rail Angle (°)": "Launch rail elevation from horizontal (90 deg = straight up).",
     "Rail Length (m)": "Length of the guide rail; rocket is constrained until it clears (m).",
@@ -494,7 +496,8 @@ class MissionControl(QWidget):
         legend = QLabel(
             f"<span style='color:{RED};'>&#9632;</span> &lt;1 cal unstable&nbsp; "
             f"<span style='color:{GREEN};'>&#9632;</span> 1-2 optimal&nbsp; "
-            f"<span style='color:{AMBER};'>&#9632;</span> &gt;2 overstable"
+            f"<span style='color:{AMBER};'>&#9632;</span> 2-3 acceptable&nbsp; "
+            f"<span style='color:{RED};'>&#9632;</span> &gt;3 overstable"
         )
         legend.setWordWrap(True)
         legend.setStyleSheet("font-size: 10px; margin-top: 10px;")
@@ -677,15 +680,101 @@ class MissionControl(QWidget):
         self.total_mass_label.setText(f"Total mass: {dry + prop:.3f} kg")
         self.total_len_label.setText(f"Total length: {length:.3f} m")
 
+    def estimate_cp(self):
+        """Simplified Barrowman estimate of the CP distance from the NOSE TIP.
+
+        Considers the nose cone and one fin set (4-fin plus configuration,
+        matching the simulation engine); a cylindrical body contributes ~zero
+        normal force. Returns None if the geometry is insufficient.
+        """
+        nose = next((p for p in self.rocket_components if p.get("type") == "nose"), None)
+        fins = next((p for p in self.rocket_components if p.get("type") == "fins"), None)
+        if nose is None:
+            return None
+        _, _, total_len, _ = self.builder_totals()
+        try:
+            nose_len = float(nose.get("length", 0))
+        except (ValueError, TypeError):
+            return None
+        if total_len <= 0 or nose_len <= 0:
+            return None
+        r = self._body_radius()
+        d = 2 * r
+
+        # Nose cone: CNa = 2, CP at ~2/3 of the nose length from the tip (conical)
+        cn_nose = 2.0
+        x_nose = (2.0 / 3.0) * nose_len
+        if fins is None or d <= 0:
+            return x_nose
+
+        try:
+            pts = parse_fin_points(fins.get("points", ""))
+            fin_y0 = float(fins.get("y_offset", 0))
+        except Exception:
+            return x_nose
+
+        xs = [p[0] for p in pts]
+        span = max(xs)
+        if span <= 0:
+            return x_nose
+        # Root chord: vertical extent near the body (x ~ 0); tip chord near max span.
+        root_ys = [p[1] for p in pts if p[0] <= 0.05 * span]
+        tip_ys = [p[1] for p in pts if p[0] >= 0.95 * span]
+        if not root_ys:
+            return x_nose
+        cr = max(root_ys) - min(root_ys)
+        ct = (max(tip_ys) - min(tip_ys)) if tip_ys else 0.0
+        if cr + ct <= 0:
+            return x_nose
+
+        # Builder y grows upward from the tail; convert to distance-from-nose.
+        root_le_from_nose = total_len - (fin_y0 + max(root_ys))
+        tip_le_y = max(tip_ys) if tip_ys else min(p[1] for p in pts)
+        m_sweep = max(0.0, max(root_ys) - tip_le_y)  # leading-edge sweep along the body axis
+
+        n_fins = 4
+        l_mid = float(np.hypot(span, m_sweep + ct / 2.0 - cr / 2.0))  # mid-chord line
+        cn_fins = (1 + r / (span + r)) * (4.0 * n_fins * (span / d) ** 2) / \
+            (1 + np.sqrt(1 + (2.0 * l_mid / (cr + ct)) ** 2))
+        x_fins = root_le_from_nose + (m_sweep / 3.0) * (cr + 2 * ct) / (cr + ct) + \
+            (1.0 / 6.0) * ((cr + ct) - (cr * ct) / (cr + ct))
+
+        return float((cn_nose * x_nose + cn_fins * x_fins) / (cn_nose + cn_fins))
+
+    def _fin_planform_area(self):
+        """Shoelace area of one fin polygon, or None."""
+        fins = next((p for p in self.rocket_components if p.get("type") == "fins"), None)
+        if fins is None:
+            return None
+        try:
+            pts = parse_fin_points(fins.get("points", ""))
+        except Exception:
+            return None
+        area = 0.0
+        for i in range(len(pts)):
+            x1, y1 = pts[i]
+            x2, y2 = pts[(i + 1) % len(pts)]
+            area += x1 * y2 - x2 * y1
+        return abs(area) / 2.0
+
     def sync_builder_to_flight(self):
         if not self.rocket_components:
             self.set_status("No components to sync. Add parts first.", AMBER)
             return
-        dry, prop, length, cg = self.builder_totals()
+        dry, prop, length, cg_from_bottom = self.builder_totals()
         self.inputs["Dry Mass (kg)"].setText(f"{dry:.3f}")
         self.inputs["Total Length (m)"].setText(f"{length:.3f}")
-        if cg > 0:
-            self.inputs["CG Dist (m)"].setText(f"{cg:.3f}")
+        # Builder positions are measured from the TAIL (y up); the flight config
+        # measures CG/CP from the NOSE TIP - convert reference frames.
+        if length > 0 and cg_from_bottom > 0:
+            self.inputs["CG Dist (m)"].setText(f"{length - cg_from_bottom:.3f}")
+        # CP from simplified Barrowman (nose + fins)
+        cp = self.estimate_cp()
+        if cp is not None:
+            self.inputs["CP Dist (m)"].setText(f"{cp:.3f}")
+        fin_area = self._fin_planform_area()
+        if fin_area:
+            self.inputs["Fin Area (m²)"].setText(f"{fin_area:.4f}")
         # Body diameter -> flight diameter
         rb = self._body_radius()
         if rb > 0:
@@ -699,7 +788,9 @@ class MissionControl(QWidget):
                     self.env_inputs["Motor File"].setText(str(p["motor_file"]))
                 break
         self.update_stability_gauge()
-        self.set_status("Flight config updated from builder (mass, length, CG, diameter).", GREEN)
+        extra = " CP estimated via Barrowman." if cp is not None else \
+            " Add a nose cone for a CP estimate."
+        self.set_status(f"Flight config updated from builder (mass, length, CG, diameter).{extra}", GREEN)
 
     # ==================================================================
     # FLIGHT TAB
@@ -730,6 +821,7 @@ class MissionControl(QWidget):
             "CP Dist (m)": QLineEdit("0.6"),
             "CG Dist (m)": QLineEdit("0.5"),
             "Fin Area (m²)": QLineEdit("0.006"),
+            "Drag Coefficient": QLineEdit("0.5"),
         }
         for l, w in self.inputs.items():
             self._decorate_numeric(w, l)
@@ -932,7 +1024,9 @@ class MissionControl(QWidget):
             return margin, "UNSTABLE - CG too far aft (<1 cal).", RED
         elif margin <= 2.0:
             return margin, "OPTIMAL stability (1-2 cal).", GREEN
-        return margin, "OVERSTABLE - heavy weathercocking (>2 cal).", AMBER
+        elif margin <= 3.0:
+            return margin, "ACCEPTABLE - slightly overstable (2-3 cal).", AMBER
+        return margin, "OVERSTABLE - heavy weathercocking (>3 cal).", RED
 
     def update_stability_gauge(self):
         margin, status, color = self.calculate_stability()
@@ -1130,7 +1224,12 @@ class MissionControl(QWidget):
         if "Stability Margin" in self.stats and "Stability Margin" in r:
             try:
                 m = float(r["Stability Margin"])
-                c = GREEN if 1.0 <= m <= 2.0 else (RED if m < 1.0 else AMBER)
+                if 1.0 <= m <= 2.0:
+                    c = GREEN
+                elif 2.0 < m <= 3.0:
+                    c = AMBER
+                else:
+                    c = RED
             except (ValueError, TypeError):
                 c = BLUE
             self.stats["Stability Margin"].setStyleSheet(
@@ -1145,17 +1244,21 @@ class MissionControl(QWidget):
             ("yes", "true", "1", "success")
         try:
             m = float(r.get("Stability Margin", 0))
-            stab_ok = 1.0 <= m <= 2.0
+            if 1.0 <= m <= 2.0:
+                stab_word, stab_c = "PASS", GREEN
+            elif 2.0 < m <= 3.0:
+                stab_word, stab_c = "OK", AMBER
+            else:
+                stab_word, stab_c = "CHECK", RED
         except (ValueError, TypeError):
-            stab_ok = False
+            stab_word, stab_c = "CHECK", AMBER
         apogee = r.get("Apogee", "?")
         impact = r.get("Impact Velocity", "?")
         rec_c = GREEN if rec_ok else RED
-        stab_c = GREEN if stab_ok else AMBER
         self.summary_bar.setText(
             f"Apogee {apogee} m   ·   Impact {impact} m/s   ·   "
             f"Recovery: <b style='color:{rec_c};'>{'PASS' if rec_ok else 'FAIL'}</b>   ·   "
-            f"Stability: <b style='color:{stab_c};'>{'PASS' if stab_ok else 'CHECK'}</b>"
+            f"Stability: <b style='color:{stab_c};'>{stab_word}</b>"
         )
 
     # ------------------------------------------------------------------

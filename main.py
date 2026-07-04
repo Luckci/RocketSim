@@ -53,7 +53,8 @@ class RocketSim:
         # Calculate Cross Sectional area automatically from input diameter
         self.area = np.pi * (self.diameter / 2)**2 
         
-        self.cd = 0.5 # Can be moved to GUI later if desired
+        # Airframe drag coefficient (optional GUI input; 0.5 is a typical slender rocket)
+        self.cd = float(config.get("Drag Coefficient", 0.5))
         self.cp_dist = float(config["CP Dist (m)"])
         self.cg_dist = float(config["CG Dist (m)"])
         self.fin_area = float(config["Fin Area (m\u00b2)"])
@@ -358,10 +359,12 @@ class RocketSim:
 
         if self.initial_stability_calibers < 1.0:
             print("WARNING: Rocket may be unstable! Move CG forward (add nose weight).")
-        elif self.initial_stability_calibers > 3.0:
-            print("ADVICE: Rocket is over stable. It might 'weather cock' (tilt) heavily in wind.")
+        elif self.initial_stability_calibers <= 2.0:
+            print("SUCCESS: Stability margin is optimal (1-2 calibers).")
+        elif self.initial_stability_calibers <= 3.0:
+            print("ACCEPTABLE: Slightly overstable (2-3 calibers). May weathercock in wind.")
         else:
-            print("SUCCESS: Stability margin is within the safe range (1-2 calibers).")
+            print("ADVICE: Rocket is over stable (>3 calibers). It might 'weather cock' (tilt) heavily in wind.")
 
     def run(self):
         print("Running 6-DOF SITL Simulation...")
@@ -561,10 +564,12 @@ class RocketSim:
         # Generate Stability Status
         if self.initial_stability_calibers < 1.0:
             stab_status = "DANGEROUS: Rocket may be unstable! Add nose weight."
-        elif self.initial_stability_calibers > 3.0:
-            stab_status = "WARNING: Overstable. May weathercock heavily."
-        else:
+        elif self.initial_stability_calibers <= 2.0:
             stab_status = "SAFE: Stability margin is optimal (1-2 cal)."
+        elif self.initial_stability_calibers <= 3.0:
+            stab_status = "ACCEPTABLE: Slightly overstable (2-3 cal). May weathercock in wind."
+        else:
+            stab_status = "WARNING: Overstable (>3 cal). May weathercock heavily."
 
         report_data = {
             # Flight Stats - Explicitly cast to float to avoid numpy errors
