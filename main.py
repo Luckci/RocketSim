@@ -485,6 +485,12 @@ class RocketSim:
                 self.decent_time = self.time - self.apogee_time
                 break
 
+        # If we bailed out via the time cap (degenerate config that never landed),
+        # still populate the summary fields with sensible values.
+        if hit_time_cap:
+            self.impact_velocity = float(np.linalg.norm(state[3:6]))
+            self.decent_time = self.time - self.apogee_time
+
         print(f"6-DOF Simulation complete. Impact at {self.time:.2f}s")
 
     def plot(self):
@@ -625,7 +631,7 @@ class FlightComputerSITL:
         output = np.clip(output, -15, 15)
         return output
     
-    def get_servo_ouputs(pitch_cmd, yaw_cmd, roll_cmd=0):
+    def get_servo_outputs(self, pitch_cmd, yaw_cmd, roll_cmd=0):
         # pitch_cmd and yaw_cmd comes from the PID loop
 
         # Standard 4 fin mixing (plus configuration)
@@ -640,6 +646,14 @@ if __name__ == "__main__":
 
     # Check if a config file is passed via command line
     config_file = sys.argv[1] if len(sys.argv) > 1 else "rocket_config.json"
+
+    # Resolve the config path robustly: honour it as given (absolute or relative to the
+    # current working directory), but fall back to the one next to this script so the
+    # simulator works regardless of the directory it is launched from.
+    if not os.path.isfile(config_file):
+        fallback = os.path.join(BASE_DIR, os.path.basename(config_file))
+        if os.path.isfile(fallback):
+            config_file = fallback
 
     sim = RocketSim(config_file)
     sim.run()
