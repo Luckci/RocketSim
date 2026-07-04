@@ -394,6 +394,11 @@ class RocketSim:
         self.parachute_deployed = False
         self.apogee_time = 0
         self.rail_departed = False
+        # Liftoff latch: many real thrust curves ramp up over the first few tens
+        # of milliseconds, during which thrust < weight. The launch pad holds the
+        # rocket until thrust wins - without this, the integrator lets the rocket
+        # "sink" below ground and the apogee detector fires on the pad.
+        self.liftoff = False
 
         self.max_velocity = 0
         self.max_mach = 0
@@ -438,6 +443,17 @@ class RocketSim:
             # Quaternions must always have a magnitude of 1
             state[6:10] /= np.linalg.norm(state[6:10])
 
+            # Launch pad constraint: before liftoff the ground supports the rocket,
+            # so it can never move below the pad or build downward velocity while
+            # the motor is still spooling up.
+            if not self.liftoff:
+                if state[1] > 0 and state[4] > 0:
+                    self.liftoff = True
+                else:
+                    state[0:3] = 0.0            # pinned to the pad
+                    state[3:6] = 0.0            # no velocity on the pad
+                    state[1] = 0.0
+
             # Latch rail departure once the rocket has cleared the rail during ascent.
             # This prevents the rail constraint from re-engaging near landing when the
             # position norm shrinks again.
@@ -450,8 +466,8 @@ class RocketSim:
                 self.max_velocity = v_mag
                 self.max_mach = v_mag / self.get_speed_of_sound(state[1])
 
-            # Apogee detection
-            if state[4] < 0 and self.apogee_time == 0:
+            # Apogee detection (only meaningful after liftoff)
+            if self.liftoff and state[4] < 0 and self.apogee_time == 0:
                 self.apogee_time = self.time
                 self.apogee_altitude = state[1]
 

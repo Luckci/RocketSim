@@ -158,6 +158,20 @@ Use `AeroTech_F40W.csv` as the reference format.
 
 Place motor CSV files in the `motors/` folder.
 
+### ThrustCurve.org integration
+
+The motor selector (`BROWSE MOTORS`) has two tabs:
+- **Local Library**: motors already in `motors/` (works offline)
+- **ThrustCurve.org**: search the full [ThrustCurve.org](https://www.thrustcurve.org)
+  catalog by motor name (e.g. `F40`), manufacturer (e.g. `Estes`) or impulse
+  class (A-O). `DOWNLOAD & USE` fetches the thrust curve via the public API,
+  saves it into `motors/` in the local CSV format, selects it as the flight
+  motor and auto-fills the propellant mass from the catalog data.
+
+Networking uses only the Python standard library (no extra dependencies) and
+runs in the background, so the UI never freezes; without internet access the
+Local Library tab keeps working.
+
 ## Outputs
 
 After a simulation run:

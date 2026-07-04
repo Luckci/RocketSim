@@ -12,9 +12,12 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QFormLayout, QLineEdit, QPushButton, QLabel,
                              QFrame, QCheckBox, QGroupBox, QScrollArea,
                              QTabWidget, QComboBox, QDialog, QDialogButtonBox,
-                             QGridLayout, QFileDialog, QSizePolicy)
-from PyQt6.QtCore import Qt, QProcess
+                             QGridLayout, QFileDialog, QSizePolicy, QListWidget,
+                             QListWidgetItem)
+from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal
 from PyQt6.QtGui import QDoubleValidator
+
+import thrustcurve
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -195,16 +198,126 @@ class MplCanvas(FigureCanvas):
 
 
 # ---------------------------------------------------------------------------
-# Motor selector dialog (scans real motor files)
+# ThrustCurve.org background workers (network must not block the UI thread)
+# ---------------------------------------------------------------------------
+# Strong references to in-flight workers. A QThread must never be destroyed
+# while running (it aborts the process), so workers are unparented and kept
+# alive here until they finish - even if the dialog that started them closes.
+_ACTIVE_WORKERS = set()
+
+
+def _track_worker(worker):
+    _ACTIVE_WORKERS.add(worker)
+    worker.finished.connect(lambda: _ACTIVE_WORKERS.discard(worker))
+
+
+class _SearchWorker(QThread):
+    """Runs a ThrustCurve.org search off the UI thread."""
+    done = pyqtSignal(list)          # list[normalized motor dict]
+    failed = pyqtSignal(str)         # human-readable error text
+
+    def __init__(self, query, impulse_class, parent=None):
+        super().__init__(parent)
+        self.query = query
+        self.impulse_class = impulse_class
+
+    def run(self):
+        try:
+            query = (self.query or "").strip()
+            imp = self.impulse_class or None
+            results = []
+            if query:
+                # Treat as a motor code (commonName) first.
+                results = thrustcurve.search_motors(
+                    common_name=query, impulse_class=imp, max_results=50)
+                # Fall back to a manufacturer search if nothing matched.
+                if not results:
+                    results = thrustcurve.search_motors(
+                        manufacturer=query, impulse_class=imp, max_results=50)
+            else:
+                # No text: browse by impulse class alone (if given).
+                results = thrustcurve.search_motors(
+                    impulse_class=imp, max_results=50)
+            self.done.emit(results)
+        except thrustcurve.ThrustCurveError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # never let a worker crash the app
+            self.failed.emit("Unexpected error: {}".format(exc))
+
+
+class _DownloadWorker(QThread):
+    """Downloads samples and saves the CSV off the UI thread."""
+    done = pyqtSignal(str, dict)     # (saved filename, motor dict)
+    failed = pyqtSignal(str)
+
+    def __init__(self, motor, motors_dir, parent=None):
+        super().__init__(parent)
+        self.motor = motor
+        self.motors_dir = motors_dir
+
+    def run(self):
+        try:
+            samples = thrustcurve.download_samples(self.motor.get("motor_id"))
+            filename = thrustcurve.save_motor_csv(self.motor, samples, self.motors_dir)
+            self.done.emit(filename, self.motor)
+        except thrustcurve.ThrustCurveError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit("Unexpected error: {}".format(exc))
+
+
+# ---------------------------------------------------------------------------
+# Motor selector dialog (local library + ThrustCurve.org search)
 # ---------------------------------------------------------------------------
 class MotorSelectorDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Rocket Motor")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(520)
         self.setStyleSheet(MODERN_STYLE)
+
+        # Which tab produced the pick: "local" or "online".
+        self._source = "local"
+        # Result of a completed ThrustCurve download (dict) once "USE" happens.
+        self._online_pick = None
+        self._tc_results = []          # normalized motor dicts from last search
+        self._search_worker = None
+        self._download_worker = None
+
         layout = QVBoxLayout(self)
 
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet(
+            f"QTabBar::tab {{ background: {PANEL}; padding: 8px 14px; "
+            f"border-top-left-radius: 6px; border-top-right-radius: 6px; }} "
+            f"QTabBar::tab:selected {{ background: {BLUE}; color: white; }}"
+        )
+        self.local_tab = QWidget()
+        self.online_tab = QWidget()
+        self.tabs.addTab(self.local_tab, "LOCAL LIBRARY")
+        self.tabs.addTab(self.online_tab, "THRUSTCURVE.ORG")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        layout.addWidget(self.tabs)
+
+        self._build_local_tab()
+        self._build_online_tab()
+
+        # Shared OK / Cancel (drives the LOCAL tab; online uses its own button).
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                        QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self._accept_local)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        if not self.motors:
+            self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+
+        self.update_detail()
+
+    # ------------------------------------------------------------------
+    # LOCAL LIBRARY tab (original behaviour)
+    # ------------------------------------------------------------------
+    def _build_local_tab(self):
+        layout = QVBoxLayout(self.local_tab)
         layout.addWidget(QLabel("Motors found in <b>motors/</b>:"))
 
         self.motors = scan_motors()
@@ -225,19 +338,23 @@ class MotorSelectorDialog(QDialog):
         self.detail.setStyleSheet(f"color: {MUTED}; background: {PANEL}; "
                                   f"border: 1px solid {BORDER}; border-radius: 6px; padding: 10px;")
         layout.addWidget(self.detail)
+        layout.addStretch()
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
-                                   QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        if not self.motors:
-            buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+    def _accept_local(self):
+        # OK button only commits a LOCAL pick; online commits via its own button.
+        if self.tabs.currentWidget() is self.local_tab:
+            self._source = "local"
+            self.accept()
 
-        self.update_detail()
+    def _on_tab_changed(self, _idx):
+        # OK button is meaningful only for the local tab.
+        on_local = self.tabs.currentWidget() is self.local_tab
+        ok_btn = self.buttons.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setEnabled(on_local and bool(self.motors))
 
     def update_detail(self):
-        m = self.selected()
+        m = self._local_selected()
         if not m:
             self.detail.setText("No motor available.")
             return
@@ -249,11 +366,213 @@ class MotorSelectorDialog(QDialog):
             f"Total impulse: {m['impulse']:.1f} N·s"
         )
 
-    def selected(self):
+    def _local_selected(self):
         idx = self.motor_list.currentIndex()
         if 0 <= idx < len(self.motors):
             return self.motors[idx]
         return None
+
+    # ------------------------------------------------------------------
+    # THRUSTCURVE.ORG tab
+    # ------------------------------------------------------------------
+    def _build_online_tab(self):
+        layout = QVBoxLayout(self.online_tab)
+
+        # Search row
+        search_row = QHBoxLayout()
+        self.tc_search = QLineEdit()
+        self.tc_search.setPlaceholderText("Search by name, e.g. F40 or Estes")
+        self.tc_search.returnPressed.connect(self._start_search)
+        search_row.addWidget(self.tc_search, 1)
+
+        self.tc_class = QComboBox()
+        self.tc_class.addItem("")  # blank = any
+        for c in "ABCDEFGHIJKLMNO":
+            self.tc_class.addItem(c)
+        self.tc_class.setToolTip("Optional impulse-class filter (A-O).")
+        self.tc_class.setFixedWidth(60)
+        search_row.addWidget(self.tc_class)
+
+        self.tc_search_btn = QPushButton("Search")
+        self.tc_search_btn.clicked.connect(self._start_search)
+        search_row.addWidget(self.tc_search_btn)
+        layout.addLayout(search_row)
+
+        # Results list
+        self.tc_list = QListWidget()
+        self.tc_list.setStyleSheet(
+            f"QListWidget {{ background: {PANEL}; border: 1px solid {BORDER}; "
+            f"border-radius: 6px; color: {TEXT}; }} "
+            f"QListWidget::item:selected {{ background: {BLUE}; color: white; }}"
+        )
+        self.tc_list.setMinimumHeight(150)
+        self.tc_list.currentRowChanged.connect(self._update_online_detail)
+        layout.addWidget(self.tc_list, 1)
+
+        # Detail panel (reuse local detail styling)
+        self.tc_detail = QLabel("Search ThrustCurve.org for a motor.")
+        self.tc_detail.setWordWrap(True)
+        self.tc_detail.setStyleSheet(f"color: {MUTED}; background: {PANEL}; "
+                                     f"border: 1px solid {BORDER}; border-radius: 6px; padding: 10px;")
+        layout.addWidget(self.tc_detail)
+
+        # Status label (errors in red)
+        self.tc_status = QLabel("")
+        self.tc_status.setWordWrap(True)
+        self.tc_status.setStyleSheet(f"color: {FAINT};")
+        layout.addWidget(self.tc_status)
+
+        # Download & use button
+        self.tc_use_btn = QPushButton("DOWNLOAD && USE")
+        self.tc_use_btn.setObjectName("LaunchBtn")
+        self.tc_use_btn.clicked.connect(self._start_download)
+        self.tc_use_btn.setEnabled(False)
+        layout.addWidget(self.tc_use_btn)
+
+    def _set_tc_status(self, msg, color=None):
+        self.tc_status.setText(msg)
+        self.tc_status.setStyleSheet(f"color: {color or FAINT};")
+
+    def _start_search(self):
+        if self._search_worker is not None:
+            return
+        query = self.tc_search.text().strip()
+        imp = self.tc_class.currentText().strip()
+        if not query and not imp:
+            self._set_tc_status("Enter a motor name or pick an impulse class.", AMBER)
+            return
+        self.tc_search_btn.setEnabled(False)
+        self.tc_search_btn.setText("Searching...")
+        self.tc_use_btn.setEnabled(False)
+        self._set_tc_status("Searching ThrustCurve.org...", BLUE)
+        self.tc_list.clear()
+        self._tc_results = []
+
+        # Unparented + tracked: outlives the dialog safely if the user closes it.
+        self._search_worker = _SearchWorker(query, imp)
+        _track_worker(self._search_worker)
+        self._search_worker.done.connect(self._on_search_done)
+        self._search_worker.failed.connect(self._on_search_failed)
+        self._search_worker.finished.connect(self._search_worker_cleanup)
+        self._search_worker.start()
+
+    def _search_worker_cleanup(self):
+        self.tc_search_btn.setEnabled(True)
+        self.tc_search_btn.setText("Search")
+        self._search_worker = None
+
+    def _on_search_done(self, results):
+        self._tc_results = results
+        self.tc_list.clear()
+        if not results:
+            self._set_tc_status("No motors found. Try a different name or class.", AMBER)
+            self.tc_detail.setText("No results.")
+            return
+        for m in results:
+            label = (f"{m['manufacturer']} {m['common_name'] or m['designation']} — "
+                     f"{m['avg_thrust_n']:.0f} N avg · {m['burn_time_s']:.1f} s burn · "
+                     f"{m['total_impulse_ns']:.0f} Ns")
+            QListWidgetItem(label, self.tc_list)
+        self._set_tc_status(f"{len(results)} motor(s) found.", GREEN)
+        self.tc_list.setCurrentRow(0)
+
+    def _on_search_failed(self, msg):
+        self._set_tc_status(
+            f"{msg}  Check your internet connection — you can still use the "
+            f"Local Library tab.", RED)
+        self.tc_detail.setText("Search failed.")
+
+    def _current_online_motor(self):
+        row = self.tc_list.currentRow()
+        if 0 <= row < len(self._tc_results):
+            return self._tc_results[row]
+        return None
+
+    def _update_online_detail(self, _row):
+        m = self._current_online_motor()
+        if not m:
+            self.tc_use_btn.setEnabled(False)
+            return
+        self.tc_use_btn.setEnabled(True)
+        parts = [f"<b>{m['name']}</b>"]
+        if m["diameter_mm"]:
+            parts.append(f"Diameter: {m['diameter_mm']:.0f} mm")
+        if m["length_mm"]:
+            parts.append(f"Length: {m['length_mm']:.0f} mm")
+        if m["type"]:
+            parts.append(f"Type: {m['type']}")
+        parts.append(f"Avg thrust: {m['avg_thrust_n']:.1f} N")
+        parts.append(f"Max thrust: {m['max_thrust_n']:.1f} N")
+        parts.append(f"Total impulse: {m['total_impulse_ns']:.1f} N·s")
+        parts.append(f"Burn time: {m['burn_time_s']:.2f} s")
+        if m["total_weight_g"]:
+            parts.append(f"Total weight: {m['total_weight_g']:.1f} g")
+        if m["prop_weight_g"]:
+            parts.append(f"Propellant: {m['prop_weight_g']:.1f} g")
+        if m["info_url"]:
+            parts.append(f"Info: {m['info_url']}")
+        self.tc_detail.setText("<br>".join(parts))
+
+    def _start_download(self):
+        if self._download_worker is not None:
+            return
+        m = self._current_online_motor()
+        if not m:
+            self._set_tc_status("Select a motor first.", AMBER)
+            return
+        self.tc_use_btn.setEnabled(False)
+        self.tc_use_btn.setText("Downloading...")
+        self.tc_search_btn.setEnabled(False)
+        self._set_tc_status("Downloading thrust curve...", BLUE)
+
+        # Unparented + tracked: outlives the dialog safely if the user closes it.
+        self._download_worker = _DownloadWorker(m, MOTORS_DIR)
+        _track_worker(self._download_worker)
+        self._download_worker.done.connect(self._on_download_done)
+        self._download_worker.failed.connect(self._on_download_failed)
+        self._download_worker.finished.connect(self._download_worker_cleanup)
+        self._download_worker.start()
+
+    def _download_worker_cleanup(self):
+        self.tc_use_btn.setText("DOWNLOAD && USE")
+        self.tc_search_btn.setEnabled(True)
+        self._download_worker = None
+
+    def _on_download_done(self, filename, motor):
+        # Re-parse the saved CSV so we return the same shape as a local pick.
+        path = os.path.join(MOTORS_DIR, filename)
+        try:
+            parsed = parse_motor_file(path)
+        except Exception:
+            parsed = {
+                "name": motor.get("name", filename),
+                "file": filename,
+                "avg_thrust": motor.get("avg_thrust_n", 0.0),
+                "peak_thrust": motor.get("max_thrust_n", 0.0),
+                "burn_time": motor.get("burn_time_s", 0.0),
+                "impulse": motor.get("total_impulse_ns", 0.0),
+            }
+        # Carry the online metadata (weights) for the caller's auto-fill bonus.
+        parsed["prop_weight_g"] = motor.get("prop_weight_g", 0.0)
+        parsed["total_weight_g"] = motor.get("total_weight_g", 0.0)
+        parsed["source"] = "thrustcurve"
+        self._online_pick = parsed
+        self._source = "online"
+        self.accept()
+
+    def _on_download_failed(self, msg):
+        self.tc_use_btn.setEnabled(True)
+        self._set_tc_status(
+            f"{msg}  Check your internet connection — you can still use the "
+            f"Local Library tab.", RED)
+
+    # ------------------------------------------------------------------
+    # Unified selection contract (works for both tabs)
+    # ------------------------------------------------------------------
+    def selected(self):
+        if self._source == "online" and self._online_pick is not None:
+            return self._online_pick
+        return self._local_selected()
 
 
 # ---------------------------------------------------------------------------
@@ -305,11 +624,24 @@ class PartEditDialog(QDialog):
                 self.inputs["motor_id"].setText(m["name"])
             if "motor_file" in self.inputs:
                 self.inputs["motor_file"].setText(m["file"])
+            # Bonus: for a ThrustCurve download, fill mass / propellant fields if present.
+            is_online = m.get("source") == "thrustcurve"
+            prop_g = m.get("prop_weight_g", 0.0) or 0.0
+            total_g = m.get("total_weight_g", 0.0) or 0.0
+            if is_online:
+                if "mass" in self.inputs and total_g > 0:
+                    self.inputs["mass"].setText(f"{total_g / 1000:.3f}")
+                if "propellant_mass" in self.inputs and prop_g > 0:
+                    self.inputs["propellant_mass"].setText(f"{prop_g / 1000:.3f}")
             # Push the chosen file to the flight config too
             parent = self.parent()
             if parent is not None and hasattr(parent, "env_inputs"):
                 parent.env_inputs["Motor File"].setText(m["file"])
-                parent.set_status(f"Motor set to {m['name']} ({m['file']}).", GREEN)
+                msg = f"Motor set to {m['name']} ({m['file']})."
+                if is_online and prop_g > 0 and hasattr(parent, "inputs"):
+                    parent.inputs["Propellant Mass (kg)"].setText(f"{prop_g / 1000:.3f}")
+                    msg += f" Propellant mass auto-filled ({prop_g / 1000:.3f} kg)."
+                parent.set_status(msg, GREEN)
 
     def request_delete(self):
         self.delete_requested = True
@@ -997,7 +1329,13 @@ class MissionControl(QWidget):
             m = browser.selected()
             if m:
                 self.env_inputs["Motor File"].setText(m["file"])
-                self.set_status(f"Motor set to {m['name']} ({m['file']}).", GREEN)
+                msg = f"Motor set to {m['name']} ({m['file']})."
+                # Bonus: auto-fill propellant mass for a ThrustCurve download.
+                prop_g = m.get("prop_weight_g", 0.0) or 0.0
+                if m.get("source") == "thrustcurve" and prop_g > 0:
+                    self.inputs["Propellant Mass (kg)"].setText(f"{prop_g / 1000:.3f}")
+                    msg += f" Propellant mass auto-filled ({prop_g / 1000:.3f} kg)."
+                self.set_status(msg, GREEN)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and \
