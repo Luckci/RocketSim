@@ -157,34 +157,47 @@ def update():
             rocket.y = LAUNCH_PAD_HEIGHT
         else:
             # Flight Phase
-            current_data = data[data['t'] <= sim_time]
-            if not current_data.empty:
-                row = current_data.iloc[-1]
+            # Bug 4: O(log n) lookup of the current row via searchsorted on the
+            # time-sorted array, replacing the per-frame DataFrame filter.
+            # side='right' - 1 gives the last index where t_arr[i] <= sim_time,
+            # matching the old `data[data['t'] <= sim_time].iloc[-1]`.
+            idx = int(np.searchsorted(t_arr, sim_time, side='right')) - 1
+            if idx >= 0:
+                # Current-row scalar values pulled from the precomputed arrays.
+                cur_pos_x = pos_x_arr[idx]
+                cur_alt = alt_arr[idx]
+                cur_pos_z = pos_z_arr[idx]
+                cur_pitch = pitch_arr[idx]
+                cur_yaw = yaw_arr[idx]
+                cur_thrust = thrust_arr[idx]
+                cur_accel = accel_arr[idx]
+                cur_vel = vel_m_arr[idx]
+                cur_recov = bool(recov_arr[idx])  # Bug 6: robust boolean
 
                 # Update the position
-                rocket.x =  row['pos_x'] * VISUAL_SCALE
-                rocket.y = (row['alt'] * VISUAL_SCALE) + LAUNCH_PAD_HEIGHT
-                rocket.z = row['pos_z'] * VISUAL_SCALE
+                rocket.x = cur_pos_x * VISUAL_SCALE
+                rocket.y = (cur_alt * VISUAL_SCALE) + LAUNCH_PAD_HEIGHT
+                rocket.z = cur_pos_z * VISUAL_SCALE
 
                 # Update the rockets rotation
                 rocket.rotation_z = 0 #90 -row['theta']
-                rocket.rotation_x = row['pitch']
-                rocket.rotation_y = row['yaw']
+                rocket.rotation_x = cur_pitch
+                rocket.rotation_y = cur_yaw
 
                 display_time = max(0, sim_time)
 
                 # DYNAMIC FLAME
-                if 'thrust' in row and row['thrust'] > 0:
+                if cur_thrust > 0:
                     flame.enabled = True
                     flicker = random.uniform(0.9, 1.1)
 
                     # Map thrust to visibile height (increase 0.05 to 0.1 for more drama)
-                    max_plume_length = (row['thrust'] * 0.15) * flicker
+                    max_plume_length = (cur_thrust * 0.15) * flicker
 
                     dist_to_pad = rocket.y - LAUNCH_PAD_HEIGHT
 
                     flame.scale_y = max(0.1, min(max_plume_length, dist_to_pad))
-                    flame.scale_x = 0.4 + (row['thrust'] * 0.02)
+                    flame.scale_x = 0.4 + (cur_thrust * 0.02)
 
                     if rocket.y < max_plume_length:
                         ground_spill.enabled = True
@@ -198,33 +211,33 @@ def update():
                         ground_spill.enabled = False
 
                     # color transitiion: Orange (low thrust) -> Yellow -> White (Peak thrust)
-                    peak_thrust = max(data['thrust'])
-                    thrust_ratio = row['thrust'] / peak_thrust
+                    # Bug 5: peak_thrust is precomputed once, not recomputed here.
+                    thrust_ratio = cur_thrust / peak_thrust if peak_thrust else 0
 
                     if thrust_ratio > 0.8:
                         flame.color = color.white
                     else:
-                        flame.color = lerp(color.orange, color.yellow, thrust_ratio)            
-                else: 
+                        flame.color = lerp(color.orange, color.yellow, thrust_ratio)
+                else:
                     flame.enabled = False
                     ground_spill.enabled = False
                 # Update HUD
                 # Divide Acceleration by Gravity to G
-                g_force = row['accel'] / 9.81
+                g_force = cur_accel / 9.81
 
-                if row['recov_d'] != True:
+                if not cur_recov:  # Bug 6: proper boolean check
                     hud_text.text = (
                         f"T+: {display_time:.2f} s\n"
-                        f"Altitude: {row['alt']:.1f} m\n"
-                        f"Velocity: {row['vel_m']:.1f} m/s\n"
+                        f"Altitude: {cur_alt:.1f} m\n"
+                        f"Velocity: {cur_vel:.1f} m/s\n"
                         f"G-Force: {g_force:.1f} G"
                     )
                     hud_text.color = color.white
-                else: 
+                else:
                     hud_text.text = (
                         f"T+: {display_time:.2f} s\n"
-                        f"Altitude: {row['alt']:.1f} m\n"
-                        f"Velocity: {row['vel_m']:.1f} m/s\n"
+                        f"Altitude: {cur_alt:.1f} m\n"
+                        f"Velocity: {cur_vel:.1f} m/s\n"
                         f"G-Force: {g_force:.1f} G\n"
                         f"Parachute status: DEPLOYED"
                     )
@@ -232,7 +245,7 @@ def update():
 
 
                 trail_timer += time.dt
-                if trail_timer > 0.05 and 'thrust' in row and row['thrust'] > 0:
+                if trail_timer > 0.05 and cur_thrust > 0:
                     puff = Entity(
                         model='sphere',
                         color=color.smoke,
@@ -242,8 +255,15 @@ def update():
                     )
                     smoke_puffs.append(puff)
                     trail_timer = 0
+                    # Bug 7: cap live smoke entities so long burns don't
+                    # accumulate unbounded; destroy the oldest beyond the cap.
+                    while len(smoke_puffs) > MAX_SMOKE_PUFFS:
+                        old = smoke_puffs.pop(0)
+                        destroy(old)
 
-                for p in smoke_puffs:
+                # Bug 3: iterate over a copy and rebuild the list so removing
+                # faded puffs doesn't skip elements.
+                for p in list(smoke_puffs):
                     growth = time.dt * 0.5
                     p.scale += Vec3(growth, growth, growth)
                     p.alpha -= time.dt * 0.2
