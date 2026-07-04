@@ -1,7 +1,9 @@
 from ursina import *
 import pandas as pd
+import numpy as np
 import random
 import os
+import sys
 from pathlib import Path
 
 app = Ursina()
@@ -9,14 +11,18 @@ app = Ursina()
 BASE_DIR = Path(__file__).resolve().parent
 
 # We tell Ursina: "The assets are here"
-application.asset_folder = BASE_DIR 
+application.asset_folder = BASE_DIR
 
 # DATA LOADING
 DATA_PATH = BASE_DIR / "data" / "flight_data.csv"
 if not DATA_PATH.exists():
+    # Bug 1: previously the code kept running with `data` undefined and
+    # crashed at `data['t'].max()`. Fail gracefully instead.
     print(f"ERROR: Data file not found at {DATA_PATH}")
-else:
-    data = pd.read_csv(str(DATA_PATH))
+    print("Cannot start playback without flight data. Exiting.")
+    sys.exit(1)
+
+data = pd.read_csv(str(DATA_PATH))
 
 
 # DATA & STATE
@@ -28,13 +34,38 @@ running = False
 # CONFIGURATION
 LAUNCH_PAD_HEIGHT = 0.01
 VISUAL_SCALE = 0.1
+MAX_SMOKE_PUFFS = 100  # Bug 7: cap the number of live smoke entities
+
+# Bug 4: precompute numpy arrays once so per-frame lookup is O(log n) via
+# np.searchsorted instead of filtering the whole DataFrame every frame.
+t_arr = data['t'].to_numpy()
+alt_arr = data['alt'].to_numpy()
+pos_x_arr = data['pos_x'].to_numpy()
+pos_z_arr = data['pos_z'].to_numpy()
+vel_m_arr = data['vel_m'].to_numpy()
+accel_arr = data['accel'].to_numpy()
+pitch_arr = data['pitch'].to_numpy()
+yaw_arr = data['yaw'].to_numpy()
+thrust_arr = data['thrust'].to_numpy()
+
+# Bug 6: normalize recov_d to a real boolean array up front (pandas may load
+# it as bool or as the strings "True"/"False").
+def _to_bool(v):
+    if isinstance(v, str):
+        return v.strip().lower() in ('true', '1', 'yes')
+    return bool(v)
+
+recov_arr = np.array([_to_bool(v) for v in data['recov_d'].to_numpy()], dtype=bool)
+
+# Bug 5: hoist peak thrust out of the per-frame update loop.
+peak_thrust = float(thrust_arr.max()) if len(thrust_arr) else 0.0
 
 smoke_puffs = []
 trail_timer = 0
 
 # Create world
 Entity(model='plane', scale=1000, texture='grass', rotation=(0,0,0)) # Ground surface
-Sky = Sky()
+sky = Sky()  # Bug 2: don't shadow the Sky class
 
 # ROCKET
 rocket = Entity(
@@ -86,7 +117,7 @@ hud_text = Text(
 
 # INPUT HANDLING
 def input(key):
-    global sim_time, running
+    global sim_time, running, trail_timer
 
     # space for launch
     if key == 'space':
@@ -96,13 +127,20 @@ def input(key):
     if key == 'r':
         running = False
         sim_time = countdown_start
+        trail_timer = 0
         rocket.position=(0,LAUNCH_PAD_HEIGHT,0)
         rocket.rotation=(0,0,90 - 89)
+        # Bug 8: also reset flame / ground_spill / hud color so a reset during
+        # flight doesn't leave stale visual state around.
+        flame.enabled = False
+        flame.color = color.orange
         ground_spill.enabled = False
+        ground_spill.scale = 0
         for p in smoke_puffs:
             destroy(p)
         smoke_puffs.clear()
         hud_text.text = "T+: 0 s\nAltitude: 0.0 m\nVelocity: 0.0 m/s\nG-Force: 0.0"
+        hud_text.color = color.white
 
 # Update loop (Like in Arduino)
 def update():
