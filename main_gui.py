@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QComboBox, QDialog, QDialogButtonBox,
                              QGridLayout, QFileDialog, QSizePolicy, QListWidget,
                              QListWidgetItem)
-from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal, QTimer, QLocale
 from PyQt6.QtGui import QDoubleValidator, QCursor
 
 import thrustcurve
@@ -638,6 +638,287 @@ class MotorSelectorDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Visual fin-shape designer
+# ---------------------------------------------------------------------------
+def _fmt_num(v):
+    """Compact fixed-point string for a fin coordinate (grid-clean)."""
+    return f"{round(float(v), 4):g}"
+
+
+def format_fin_points(pts):
+    """Serialize [[x, y], ...] back to the canonical '(x,y), (x,y), ...' string."""
+    return ", ".join(f"({_fmt_num(x)},{_fmt_num(y)})" for x, y in pts)
+
+
+# Preset fin planforms (outward span x, chord-up y), snapped to the 5 mm grid.
+FIN_PRESETS = {
+    "Trapezoid": [[0, 0], [0.07, 0.01], [0.07, 0.06], [0, 0.08]],
+    "Swept": [[0, 0], [0.08, 0.05], [0.08, 0.08], [0, 0.08]],
+    "Delta": [[0, 0], [0.09, 0.08], [0, 0.08]],
+    "Clipped delta": [[0, 0], [0.09, 0.06], [0.09, 0.08], [0, 0.08]],
+}
+
+
+class FinShapeEditor(QWidget):
+    """Interactive fin-polygon editor.
+
+    Exposes ``points_field`` (a QLineEdit carrying the canonical
+    '(x,y), (x,y), ...' string) so the surrounding dialog can register it in its
+    ``inputs`` map and keep storage/save/load unchanged. Drives its own private
+    matplotlib canvas events - it never touches the main schematic canvas.
+    """
+
+    GRID = 0.005          # 5 mm snap
+    PICK_PX = 14          # pixel radius to grab a vertex
+    EDGE_PX = 12          # pixel radius to hit an edge for insertion
+
+    def __init__(self, points_text, parent=None):
+        super().__init__(parent)
+        self.points = self._parse_or_default(points_text)
+        self._drag_idx = None
+        self._syncing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        # --- Preset buttons ---
+        presets = QHBoxLayout()
+        presets.setSpacing(4)
+        lbl = QLabel("Presets:")
+        lbl.setStyleSheet(f"color: {FAINT}; font-size: 10px;")
+        presets.addWidget(lbl)
+        for name in FIN_PRESETS:
+            b = QPushButton(name)
+            b.setObjectName("GhostBtn")
+            b.setStyleSheet("font-size: 10px; padding: 4px 6px;")
+            b.clicked.connect(lambda _=False, n=name: self.load_preset(n))
+            presets.addWidget(b)
+        presets.addStretch(1)
+        root.addLayout(presets)
+
+        # --- Canvas ---
+        self.canvas = FigureCanvas(Figure(figsize=(4.6, 4.0), dpi=100, facecolor=BG))
+        self.canvas.setMinimumHeight(300)
+        self.ax = self.canvas.figure.add_subplot(111)
+        root.addWidget(self.canvas, 1)
+
+        self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
+
+        # --- Live readout ---
+        self.readout = QLabel("")
+        self.readout.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        root.addWidget(self.readout)
+
+        hint = QLabel("Drag a vertex - double-click an edge to add - "
+                      "right-click a vertex to delete")
+        hint.setStyleSheet(f"color: {FAINT}; font-size: 10px;")
+        root.addWidget(hint)
+
+        # --- Raw text field (two-way synced) ---
+        self.points_field = QLineEdit(format_fin_points(self.points))
+        self.points_field.setToolTip("Raw points: (x1,y1), (x2,y2), ...  "
+                                     "x = outward from the body wall (m), y = up (m).")
+        self.points_field.textEdited.connect(self._on_text_edited)
+        root.addWidget(self.points_field)
+
+        self._redraw()
+
+    # -- data helpers -------------------------------------------------
+    @staticmethod
+    def _parse_or_default(text):
+        try:
+            return [list(p) for p in parse_fin_points(text)]
+        except Exception:
+            return [list(p) for p in FIN_PRESETS["Trapezoid"]]
+
+    def _snap(self, v):
+        return round(v / self.GRID) * self.GRID
+
+    def _area(self):
+        pts = self.points
+        a = 0.0
+        for i in range(len(pts)):
+            x1, y1 = pts[i]
+            x2, y2 = pts[(i + 1) % len(pts)]
+            a += x1 * y2 - x2 * y1
+        return abs(a) / 2.0
+
+    def _metrics(self):
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        span = max(xs) if xs else 0.0
+        root_ys = [p[1] for p in self.points if p[0] <= 0.05 * span] or ys
+        cr = (max(root_ys) - min(root_ys)) if root_ys else 0.0
+        return self._area(), cr, span, len(self.points)
+
+    # -- text sync ----------------------------------------------------
+    def _push_text(self):
+        self._syncing = True
+        self.points_field.setText(format_fin_points(self.points))
+        self._syncing = False
+
+    def _on_text_edited(self, text):
+        if self._syncing:
+            return
+        try:
+            self.points = [list(p) for p in parse_fin_points(text)]
+        except Exception:
+            return  # leave canvas as-is until the text parses
+        self._redraw(push_text=False)
+
+    def load_preset(self, name):
+        self.points = [list(p) for p in FIN_PRESETS[name]]
+        self._push_text()
+        self._redraw(push_text=False)
+
+    # -- picking ------------------------------------------------------
+    def _vertex_at(self, event):
+        """Index of a vertex within PICK_PX of the event, or None."""
+        if event.x is None or event.y is None:
+            return None
+        best, best_d = None, self.PICK_PX
+        for i, (x, y) in enumerate(self.points):
+            px, py = self.ax.transData.transform((x, y))
+            d = ((px - event.x) ** 2 + (py - event.y) ** 2) ** 0.5
+            if d <= best_d:
+                best, best_d = i, d
+        return best
+
+    def _edge_insert_index(self, event):
+        """(index, [x, y]) for the closest polygon edge within EDGE_PX, else None."""
+        if event.xdata is None or event.ydata is None:
+            return None
+        ex, ey = event.x, event.y
+        n = len(self.points)
+        best = None
+        best_d = self.EDGE_PX
+        for i in range(n):
+            ax_, ay_ = self.ax.transData.transform(self.points[i])
+            bx_, by_ = self.ax.transData.transform(self.points[(i + 1) % n])
+            dx, dy = bx_ - ax_, by_ - ay_
+            seg2 = dx * dx + dy * dy
+            if seg2 == 0:
+                continue
+            t = ((ex - ax_) * dx + (ey - ay_) * dy) / seg2
+            t = max(0.0, min(1.0, t))
+            cx, cy = ax_ + t * dx, ay_ + t * dy
+            d = ((cx - ex) ** 2 + (cy - ey) ** 2) ** 0.5
+            if d <= best_d:
+                best_d = d
+                new_pt = [max(0.0, self._snap(event.xdata)), self._snap(event.ydata)]
+                best = (i + 1, new_pt)
+        return best
+
+    # -- mouse events -------------------------------------------------
+    def _on_press(self, event):
+        if event.inaxes is not self.ax:
+            return
+        idx = self._vertex_at(event)
+        # Right-click a vertex -> delete (refuse below 3 points).
+        if event.button == 3:
+            if idx is not None:
+                if len(self.points) <= 3:
+                    self.readout.setText("Need at least 3 points - cannot delete.")
+                else:
+                    self.points.pop(idx)
+                    self._push_text()
+                    self._redraw(push_text=False)
+            return
+        if event.button != 1:
+            return
+        # Double-click on an edge -> insert a vertex there.
+        if event.dblclick:
+            ins = self._edge_insert_index(event)
+            if ins is not None:
+                i, pt = ins
+                self.points.insert(i, pt)
+                self._push_text()
+                self._redraw(push_text=False)
+            return
+        # Single left click near a vertex -> begin drag.
+        if idx is not None:
+            self._drag_idx = idx
+
+    def _on_motion(self, event):
+        if self._drag_idx is None or event.inaxes is not self.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        x = max(0.0, self._snap(event.xdata))   # constrain x >= 0 (outside body)
+        y = self._snap(event.ydata)
+        self.points[self._drag_idx] = [x, y]
+        self._push_text()
+        self._redraw(push_text=False)
+
+    def _on_release(self, event):
+        self._drag_idx = None
+
+    # -- rendering ----------------------------------------------------
+    def _redraw(self, push_text=True):
+        if push_text:
+            self._push_text()
+        ax = self.ax
+        ax.clear()
+        ax.set_facecolor(BG)
+
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        span = max(xs + [0.02])
+        top = max(ys + [0.02])
+        xmax = span * 1.25 + 0.01
+        ymax = top * 1.15 + 0.01
+        xmin = -xmax * 0.18
+
+        # Body side (x < 0) shaded so orientation is obvious.
+        ax.axvspan(xmin, 0, color=CARD, alpha=0.9, zorder=0)
+        ax.axvline(0, color=MUTED, lw=1.4, zorder=3)
+        ax.text(xmin * 0.5, ymax * 0.5, "BODY", color=FAINT, fontsize=8,
+                rotation=90, ha="center", va="center", zorder=1)
+
+        # Light 5 mm grid.
+        g = self.GRID
+        gx = 0.0
+        while gx <= xmax:
+            ax.axvline(gx, color=BORDER, lw=0.4, alpha=0.6, zorder=1)
+            gx += g
+        gy = 0.0
+        while gy <= ymax:
+            ax.axhline(gy, color=BORDER, lw=0.4, alpha=0.6, zorder=1)
+            gy += g
+
+        # Fin polygon + vertices.
+        poly_x = xs + [xs[0]]
+        poly_y = ys + [ys[0]]
+        ax.fill(poly_x, poly_y, color=BLUE, alpha=0.35, zorder=2)
+        ax.plot(poly_x, poly_y, color=BLUE, lw=1.8, zorder=4)
+        ax.plot(xs, ys, "o", color=TEXT, markersize=7,
+                markeredgecolor=BLUE, zorder=5)
+
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(-ymax * 0.06, ymax)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("outward from body wall (m)", color=MUTED, fontsize=8)
+        ax.set_ylabel("up from y-offset (m)", color=MUTED, fontsize=8)
+        ax.tick_params(colors=MUTED, labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_color(BORDER)
+        try:
+            self.canvas.figure.tight_layout()
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+        area, cr, span_m, n = self._metrics()
+        self.readout.setText(
+            f"Planform area: {area * 1e4:.1f} cm2  ({area:.5f} m2)   "
+            f"Root chord: {cr * 100:.1f} cm   Span: {span_m * 100:.1f} cm   "
+            f"Points: {n}")
+
+
+# ---------------------------------------------------------------------------
 # Part edit dialog
 # ---------------------------------------------------------------------------
 class PartEditDialog(QDialog):
@@ -648,15 +929,43 @@ class PartEditDialog(QDialog):
         self.layout = QFormLayout(self)
         self.delete_requested = False
         self.inputs = {}
+        self.numeric_keys = set()      # keys whose value must parse as a float
+        self.fin_editor = None
+        self.part_data = part_data     # same dict object the parent holds
+        self._mc = parent if hasattr(parent, "update_schematic") else None
+
+        is_fins = part_data.get("type") == "fins"
+        # Read-only, user-can't-typo fields (set via BROWSE MOTORS).
+        readonly_keys = {"motor_file", "motor_id"}
 
         for key, value in part_data.items():
             if key == "type":
                 continue
+            # The fins "points" key is edited through the visual designer, which
+            # owns its own text field - don't add a bare row for it here.
+            if is_fins and key == "points":
+                self.fin_editor = FinShapeEditor(str(value), self)
+                self.inputs[key] = self.fin_editor.points_field
+                self.layout.addRow(self.fin_editor)
+                continue
+
             field = QLineEdit(str(value))
             label, tip = PART_KEY_HELP.get(
                 key, (key.replace('_', ' ').capitalize(), ""))
             if tip:
                 field.setToolTip(tip)
+            # Numeric fields (original value is a number, not a string) get a
+            # validator + red-flag-on-bad-input; name/motor_* stay text.
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self.numeric_keys.add(key)
+                validator = QDoubleValidator()
+                validator.setLocale(QLocale(QLocale.Language.C))
+                validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+                field.setValidator(validator)
+            if key in readonly_keys:
+                field.setReadOnly(True)
+                field.setStyleSheet(f"color: {FAINT};")
+                field.setToolTip("Set via BROWSE MOTORS - not directly editable.")
             self.inputs[key] = field
             self.layout.addRow(f"{label}:", field)
 
@@ -664,15 +973,18 @@ class PartEditDialog(QDialog):
             self.motor_btn = QPushButton("BROWSE MOTORS")
             self.motor_btn.clicked.connect(self.open_motor_browser)
             self.layout.addRow("Selection", self.motor_btn)
-        elif part_data.get("type") == "fins":
-            help_text = QLabel("<small>Format: (x1,y1), (x2,y2), (x3,y3), (x4,y4)<br>"
-                               "Starts from the bottom-inner corner.</small>")
-            self.layout.addRow(help_text)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                         QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
+
+        # Live-apply: push current values into the part and redraw without closing.
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("GhostBtn")
+        self.apply_btn.clicked.connect(self.apply_changes)
+        self.apply_btn.setEnabled(self._mc is not None)
+        self.buttons.addButton(self.apply_btn, QDialogButtonBox.ButtonRole.ApplyRole)
 
         self.delete_btn = QPushButton("DELETE COMPONENT")
         self.delete_btn.setStyleSheet(f"background-color: {RED}; color: white; margin-top: 10px;")
@@ -680,6 +992,9 @@ class PartEditDialog(QDialog):
 
         self.layout.addWidget(self.buttons)
         self.layout.addWidget(self.delete_btn)
+
+        if is_fins:
+            self.resize(560, 640)
 
     def open_motor_browser(self):
         browser = MotorSelectorDialog(self)
@@ -712,7 +1027,42 @@ class PartEditDialog(QDialog):
 
     def request_delete(self):
         self.delete_requested = True
-        self.accept()
+        # Deletion should not be blocked by an unrelated invalid field.
+        QDialog.accept(self)
+
+    def _validate_numeric(self):
+        """Flag every non-parsing numeric field red. Returns True if all valid."""
+        ok = True
+        for key in self.numeric_keys:
+            widget = self.inputs[key]
+            try:
+                float(widget.text())
+                widget.setProperty("invalid", False)
+            except ValueError:
+                widget.setProperty("invalid", True)
+                ok = False
+            widget.setStyle(widget.style())
+        return ok
+
+    def accept(self):
+        # Keep the dialog open if a numeric field doesn't parse.
+        if not self._validate_numeric():
+            return
+        super().accept()
+
+    def apply_changes(self):
+        """Push current (valid) values into the live part and redraw the parent."""
+        if self._mc is None:
+            return
+        if not self._validate_numeric():
+            return
+        self.part_data.update(self.get_values())
+        self._mc.update_schematic()
+        if hasattr(self._mc, "refresh_sidebar"):
+            self._mc.refresh_sidebar()
+        if hasattr(self._mc, "set_status"):
+            self._mc.set_status(
+                f"Applied changes to {self.part_data.get('name', 'part')}.", GREEN)
 
     def get_values(self):
         results = {}
