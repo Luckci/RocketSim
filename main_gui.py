@@ -878,17 +878,19 @@ class FinShapeEditor(QWidget):
         ax.text(xmin * 0.5, ymax * 0.5, "BODY", color=FAINT, fontsize=8,
                 rotation=90, ha="center", va="center", zorder=1)
 
-        # Light 5 mm grid.
+        # Light 5 mm grid (cap line count to avoid thousands of artists if dragged far).
         g = self.GRID
+        max_lines = 250
+        step_x = g if (xmax / g) <= max_lines else (xmax / max_lines)
+        step_y = g if (ymax / g) <= max_lines else (ymax / max_lines)
         gx = 0.0
         while gx <= xmax:
             ax.axvline(gx, color=BORDER, lw=0.4, alpha=0.6, zorder=1)
-            gx += g
+            gx += step_x
         gy = 0.0
         while gy <= ymax:
             ax.axhline(gy, color=BORDER, lw=0.4, alpha=0.6, zorder=1)
-            gy += g
-
+            gy += step_y
         # Fin polygon + vertices.
         poly_x = xs + [xs[0]]
         poly_y = ys + [ys[0]]
