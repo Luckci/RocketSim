@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QComboBox, QDialog, QDialogButtonBox,
                              QGridLayout, QFileDialog, QSizePolicy, QListWidget,
                              QListWidgetItem)
-from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal
-from PyQt6.QtGui import QDoubleValidator
+from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QDoubleValidator, QCursor
 
 import thrustcurve
 
@@ -793,7 +793,11 @@ class MissionControl(QWidget):
 
         # --- Center: schematic ---
         self.schematic_canvas = MplCanvas(width=5, height=8)
+        # Overlapping parts (motor inside body) fire one pick_event per artist for
+        # a single click. Buffer them and resolve to the single most specific part.
+        self._pick_buffer = []
         self.schematic_canvas.mpl_connect('pick_event', self.on_part_clicked)
+        self.schematic_canvas.mpl_connect('motion_notify_event', self.on_schematic_hover)
 
         # --- Right: stability + totals ---
         self.stability_panel = QGroupBox("STABILITY ANALYSIS")
@@ -882,12 +886,55 @@ class MissionControl(QWidget):
             self.part_list_layout.addWidget(card)
 
     def on_part_clicked(self, event):
-        # Single edit path: identify the part index and delegate.
+        # One click over overlapping parts fires a pick_event per artist. Matplotlib
+        # delivers them all synchronously before returning to the Qt loop, so buffer
+        # them here and resolve once via a zero-delay timer (fires when the loop is
+        # idle again, i.e. after every pick for this click has arrived).
+        artist = getattr(event, 'artist', None)
+        if not hasattr(artist, 'part_index'):
+            return
+        schedule = not self._pick_buffer
+        self._pick_buffer.append(artist)
+        if schedule:
+            QTimer.singleShot(0, self._resolve_pick_buffer)
+
+    def _resolve_pick_buffer(self):
+        # Choose the most specific part under the cursor: the smallest patch area
+        # (motor inside a body tube, fins vs. body, etc.), then open exactly one
+        # dialog through the single edit path.
+        artists = self._pick_buffer
+        self._pick_buffer = []
+        if not artists:
+            return
+        best = min(artists, key=self._artist_area)
         try:
-            idx = int(event.artist.part_index)
+            idx = int(best.part_index)
         except (AttributeError, ValueError, TypeError):
             return
         self.open_edit_dialog_by_index(idx)
+
+    @staticmethod
+    def _artist_area(artist):
+        # Approximate area of a patch from its data-space bounding box; smaller
+        # means more specific / deeper in the stack.
+        try:
+            bbox = artist.get_extents()
+            return abs(bbox.width * bbox.height)
+        except Exception:
+            return float('inf')
+
+    def on_schematic_hover(self, event):
+        # Subtle affordance: pointing-hand cursor over a clickable part, arrow
+        # otherwise. No redraws - just a cheap contains() test per patch.
+        over_part = False
+        if event.inaxes is self.schematic_canvas.axes:
+            for patch in self.schematic_canvas.axes.patches:
+                if hasattr(patch, 'part_index') and patch.contains(event)[0]:
+                    over_part = True
+                    break
+        shape = Qt.CursorShape.PointingHandCursor if over_part else Qt.CursorShape.ArrowCursor
+        if self.schematic_canvas.cursor().shape() != shape:
+            self.schematic_canvas.setCursor(QCursor(shape))
 
     def open_edit_dialog_by_index(self, idx):
         if not (0 <= idx < len(self.rocket_components)):
@@ -942,12 +989,15 @@ class MissionControl(QWidget):
                 continue
             max_height = max(max_height, y0 + h)
 
+            # zorder stacks body lowest, then nose/fins, motor on top so the
+            # innermost part is drawn - and clicked - on top of what contains it.
             shape = None
             if ptype == "body":
-                shape = Rectangle((-w / 2, y0), w, h, color=CARD, ec=BLUE, lw=2, picker=True)
+                shape = Rectangle((-w / 2, y0), w, h, color=CARD, ec=BLUE, lw=2,
+                                  picker=True, zorder=1)
             elif ptype == "nose":
                 shape = Polygon([[-w / 2, y0], [w / 2, y0], [0, y0 + h]],
-                                color=BLUE, ec='white', lw=1, picker=True)
+                                color=BLUE, ec='white', lw=1, picker=True, zorder=2)
             elif ptype == "fins":
                 try:
                     raw = parse_fin_points(part["points"])
@@ -957,16 +1007,16 @@ class MissionControl(QWidget):
                 right = [[p[0] + r_body, p[1] + y0] for p in raw]
                 left = [[-p[0] - r_body, p[1] + y0] for p in raw]
                 for pts in (right, left):
-                    poly = Polygon(pts, color=BLUE, alpha=0.75, picker=True)
+                    poly = Polygon(pts, color=BLUE, alpha=0.75, picker=True, zorder=2)
                     poly.part_index = i
                     ax.add_patch(poly)
                 max_height = max(max_height, y0 + max(p[1] for p in raw))
                 continue
             elif ptype == "motor":
                 shape = Rectangle((-w / 2, max(y0, 0.0)), w, h,
-                                  color="#52525b", ec=MUTED, lw=1, picker=True)
+                                  color="#52525b", ec=MUTED, lw=1, picker=True, zorder=3)
                 ax.text(0, y0 + h / 2, str(part.get("motor_id", "")), color='white',
-                        ha='center', va='center', fontsize=7, fontweight='bold')
+                        ha='center', va='center', fontsize=7, fontweight='bold', zorder=4)
 
             if shape is not None:
                 shape.part_index = i
