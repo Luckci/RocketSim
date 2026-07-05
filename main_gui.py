@@ -1305,6 +1305,8 @@ class PartEditDialog(QDialog):
 
     def _try_live_apply(self):
         # apply_changes() already validates + redraws; a bad field just no-ops.
+        if self._mc is None or not self.live_cb.isChecked():
+            return
         self.apply_changes()
 
     def apply_changes(self):
