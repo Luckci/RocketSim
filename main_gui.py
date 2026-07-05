@@ -14,8 +14,8 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QTabWidget, QComboBox, QDialog, QDialogButtonBox,
                              QGridLayout, QFileDialog, QSizePolicy, QListWidget,
                              QListWidgetItem)
-from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal
-from PyQt6.QtGui import QDoubleValidator
+from PyQt6.QtCore import Qt, QProcess, QThread, pyqtSignal, QTimer, QLocale
+from PyQt6.QtGui import QDoubleValidator, QCursor
 
 import thrustcurve
 
@@ -62,6 +62,68 @@ TOOLTIPS = {
     "Chute Cd": "Parachute drag coefficient (typical flat sheet ~0.75, dome ~1.5).",
     "Chute Delay (s)": "Delay after apogee before the parachute deploys (seconds).",
 }
+
+# Per-part-key help for the PartEditDialog: key -> (nice label with units, tooltip).
+# New parts introduce many geometry keys; this keeps the auto-generated edit
+# dialogs self-explanatory without restructuring the dialog.
+PART_KEY_HELP = {
+    "mass": ("Mass (kg)", "Component mass in kilograms."),
+    "length": ("Length (m)", "Length along the rocket axis (m)."),
+    "diameter": ("Diameter (m)", "Outer diameter (m)."),
+    "y_offset": ("Y offset from tail (m)",
+                 "Axial position of the part's lower end, measured up from the tail (m)."),
+    "fore_diameter": ("Fore diameter (m)", "Diameter at the forward, nose-facing end (m)."),
+    "aft_diameter": ("Aft diameter (m)", "Diameter at the aft, tail-facing end (m)."),
+    "height": ("Height (m)", "Axial extent of the part along the rocket axis (m)."),
+    "thickness": ("Thickness (m)", "Axial thickness of the disc (m)."),
+    "outer_diameter": ("Outer diameter (m)", "Outer diameter of the ring (m)."),
+    "inner_diameter": ("Inner diameter (m)", "Inner bore diameter of the ring (m)."),
+    "packed_length": ("Packed length (m)", "Stowed length inside the airframe (m)."),
+    "packed_diameter": ("Packed diameter (m)", "Stowed diameter inside the airframe (m)."),
+    "chute_diameter": ("Chute diameter (m)", "Deployed canopy diameter (m)."),
+    "chute_cd": ("Chute Cd", "Parachute drag coefficient (flat sheet ~0.75, dome ~1.5)."),
+    "strip_length": ("Strip length (m)", "Length of the streamer strip (m)."),
+    "strip_width": ("Strip width (m)", "Width of the streamer strip (m)."),
+    "cord_length": ("Cord length (m)", "Deployed shock-cord length (m)."),
+    "propellant_mass": ("Propellant mass (kg)", "Propellant mass burned during thrust (kg)."),
+}
+
+# Per-part-type one-line description used for the CONSTRUCTION KIT button tooltips.
+PART_TOOLTIPS = {
+    "body": "Cylindrical body tube - the main airframe section.",
+    "nose": "Nose cone at the top of the airframe.",
+    "transition": "Conical transition / reducer between two body diameters.",
+    "boattail": "Tail cone at the base that narrows toward the aft end.",
+    "fins": "Fin set (4-fin plus configuration).",
+    "launch_lug": "Small tube on the body side that rides the launch rod.",
+    "rail_button": "Tiny standoff button that rides a launch rail.",
+    "coupler": "Internal tube coupler joining two airframe sections.",
+    "bulkhead": "Internal disc / pressure bulkhead.",
+    "centering_ring": "Internal ring centring an inner tube in the airframe.",
+    "avionics": "Internal avionics bay / payload section.",
+    "ballast": "Internal mass added to trim the centre of gravity.",
+    "parachute": "Packed parachute for recovery.",
+    "streamer": "Packed streamer for recovery.",
+    "shock_cord": "Packed shock cord tethering the sections.",
+    "motor": "Rocket motor / reload.",
+}
+
+# CONSTRUCTION KIT layout: ordered sections of part-type keys.
+KIT_SECTIONS = [
+    ("AERODYNAMIC", ["body", "nose", "transition", "boattail", "fins",
+                     "launch_lug", "rail_button"]),
+    ("INTERNAL", ["coupler", "bulkhead", "centering_ring", "avionics", "ballast"]),
+    ("RECOVERY", ["parachute", "streamer", "shock_cord"]),
+    ("PROPULSION", ["motor"]),
+]
+
+# Types whose length physically extends the airframe (nose tip to tail). Internal
+# parts, side lugs/buttons and recovery gear must NOT inflate the total length.
+AIRFRAME_TYPES = {"body", "nose", "transition", "boattail", "motor"}
+
+# Types drawn with the "internal" style (dashed edge, low alpha, inside the body).
+INTERNAL_TYPES = {"coupler", "bulkhead", "centering_ring", "avionics", "ballast",
+                  "parachute", "streamer", "shock_cord"}
 
 # ---------------------------------------------------------------------------
 # Theme
@@ -576,6 +638,289 @@ class MotorSelectorDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Visual fin-shape designer
+# ---------------------------------------------------------------------------
+def _fmt_num(v):
+    """Compact fixed-point string for a fin coordinate (grid-clean)."""
+    return f"{round(float(v), 4):g}"
+
+
+def format_fin_points(pts):
+    """Serialize [[x, y], ...] back to the canonical '(x,y), (x,y), ...' string."""
+    return ", ".join(f"({_fmt_num(x)},{_fmt_num(y)})" for x, y in pts)
+
+
+# Preset fin planforms (outward span x, chord-up y), snapped to the 5 mm grid.
+FIN_PRESETS = {
+    "Trapezoid": [[0, 0], [0.07, 0.01], [0.07, 0.06], [0, 0.08]],
+    "Swept": [[0, 0], [0.08, 0.05], [0.08, 0.08], [0, 0.08]],
+    "Delta": [[0, 0], [0.09, 0.08], [0, 0.08]],
+    "Clipped delta": [[0, 0], [0.09, 0.06], [0.09, 0.08], [0, 0.08]],
+}
+
+
+class FinShapeEditor(QWidget):
+    """Interactive fin-polygon editor.
+
+    Exposes ``points_field`` (a QLineEdit carrying the canonical
+    '(x,y), (x,y), ...' string) so the surrounding dialog can register it in its
+    ``inputs`` map and keep storage/save/load unchanged. Drives its own private
+    matplotlib canvas events - it never touches the main schematic canvas.
+    """
+
+    GRID = 0.005          # 5 mm snap
+    PICK_PX = 14          # pixel radius to grab a vertex
+    EDGE_PX = 12          # pixel radius to hit an edge for insertion
+
+    def __init__(self, points_text, parent=None):
+        super().__init__(parent)
+        self.points = self._parse_or_default(points_text)
+        self._drag_idx = None
+        self._syncing = False
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        # --- Preset buttons ---
+        presets = QHBoxLayout()
+        presets.setSpacing(4)
+        lbl = QLabel("Presets:")
+        lbl.setStyleSheet(f"color: {FAINT}; font-size: 10px;")
+        presets.addWidget(lbl)
+        for name in FIN_PRESETS:
+            b = QPushButton(name)
+            b.setObjectName("GhostBtn")
+            b.setStyleSheet("font-size: 10px; padding: 4px 6px;")
+            b.clicked.connect(lambda _=False, n=name: self.load_preset(n))
+            presets.addWidget(b)
+        presets.addStretch(1)
+        root.addLayout(presets)
+
+        # --- Canvas ---
+        self.canvas = FigureCanvas(Figure(figsize=(4.6, 4.0), dpi=100, facecolor=BG))
+        self.canvas.setMinimumHeight(300)
+        self.ax = self.canvas.figure.add_subplot(111)
+        root.addWidget(self.canvas, 1)
+
+        self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
+
+        # --- Live readout ---
+        self.readout = QLabel("")
+        self.readout.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        root.addWidget(self.readout)
+
+        hint = QLabel("Drag a vertex - double-click an edge to add - "
+                      "right-click a vertex to delete")
+        hint.setStyleSheet(f"color: {FAINT}; font-size: 10px;")
+        root.addWidget(hint)
+
+        # --- Raw text field (two-way synced) ---
+        self.points_field = QLineEdit(format_fin_points(self.points))
+        self.points_field.setToolTip("Raw points: (x1,y1), (x2,y2), ...  "
+                                     "x = outward from the body wall (m), y = up (m).")
+        self.points_field.textEdited.connect(self._on_text_edited)
+        root.addWidget(self.points_field)
+
+        self._redraw()
+
+    # -- data helpers -------------------------------------------------
+    @staticmethod
+    def _parse_or_default(text):
+        try:
+            return [list(p) for p in parse_fin_points(text)]
+        except Exception:
+            return [list(p) for p in FIN_PRESETS["Trapezoid"]]
+
+    def _snap(self, v):
+        return round(v / self.GRID) * self.GRID
+
+    def _area(self):
+        pts = self.points
+        a = 0.0
+        for i in range(len(pts)):
+            x1, y1 = pts[i]
+            x2, y2 = pts[(i + 1) % len(pts)]
+            a += x1 * y2 - x2 * y1
+        return abs(a) / 2.0
+
+    def _metrics(self):
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        span = max(xs) if xs else 0.0
+        root_ys = [p[1] for p in self.points if p[0] <= 0.05 * span] or ys
+        cr = (max(root_ys) - min(root_ys)) if root_ys else 0.0
+        return self._area(), cr, span, len(self.points)
+
+    # -- text sync ----------------------------------------------------
+    def _push_text(self):
+        self._syncing = True
+        self.points_field.setText(format_fin_points(self.points))
+        self._syncing = False
+
+    def _on_text_edited(self, text):
+        if self._syncing:
+            return
+        try:
+            self.points = [list(p) for p in parse_fin_points(text)]
+        except Exception:
+            return  # leave canvas as-is until the text parses
+        self._redraw(push_text=False)
+
+    def load_preset(self, name):
+        self.points = [list(p) for p in FIN_PRESETS[name]]
+        self._push_text()
+        self._redraw(push_text=False)
+
+    # -- picking ------------------------------------------------------
+    def _vertex_at(self, event):
+        """Index of a vertex within PICK_PX of the event, or None."""
+        if event.x is None or event.y is None:
+            return None
+        best, best_d = None, self.PICK_PX
+        for i, (x, y) in enumerate(self.points):
+            px, py = self.ax.transData.transform((x, y))
+            d = ((px - event.x) ** 2 + (py - event.y) ** 2) ** 0.5
+            if d <= best_d:
+                best, best_d = i, d
+        return best
+
+    def _edge_insert_index(self, event):
+        """(index, [x, y]) for the closest polygon edge within EDGE_PX, else None."""
+        if event.xdata is None or event.ydata is None:
+            return None
+        ex, ey = event.x, event.y
+        n = len(self.points)
+        best = None
+        best_d = self.EDGE_PX
+        for i in range(n):
+            ax_, ay_ = self.ax.transData.transform(self.points[i])
+            bx_, by_ = self.ax.transData.transform(self.points[(i + 1) % n])
+            dx, dy = bx_ - ax_, by_ - ay_
+            seg2 = dx * dx + dy * dy
+            if seg2 == 0:
+                continue
+            t = ((ex - ax_) * dx + (ey - ay_) * dy) / seg2
+            t = max(0.0, min(1.0, t))
+            cx, cy = ax_ + t * dx, ay_ + t * dy
+            d = ((cx - ex) ** 2 + (cy - ey) ** 2) ** 0.5
+            if d <= best_d:
+                best_d = d
+                new_pt = [max(0.0, self._snap(event.xdata)), self._snap(event.ydata)]
+                best = (i + 1, new_pt)
+        return best
+
+    # -- mouse events -------------------------------------------------
+    def _on_press(self, event):
+        if event.inaxes is not self.ax:
+            return
+        idx = self._vertex_at(event)
+        # Right-click a vertex -> delete (refuse below 3 points).
+        if event.button == 3:
+            if idx is not None:
+                if len(self.points) <= 3:
+                    self.readout.setText("Need at least 3 points - cannot delete.")
+                else:
+                    self.points.pop(idx)
+                    self._push_text()
+                    self._redraw(push_text=False)
+            return
+        if event.button != 1:
+            return
+        # Double-click on an edge -> insert a vertex there.
+        if event.dblclick:
+            ins = self._edge_insert_index(event)
+            if ins is not None:
+                i, pt = ins
+                self.points.insert(i, pt)
+                self._push_text()
+                self._redraw(push_text=False)
+            return
+        # Single left click near a vertex -> begin drag.
+        if idx is not None:
+            self._drag_idx = idx
+
+    def _on_motion(self, event):
+        if self._drag_idx is None or event.inaxes is not self.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+        x = max(0.0, self._snap(event.xdata))   # constrain x >= 0 (outside body)
+        y = self._snap(event.ydata)
+        self.points[self._drag_idx] = [x, y]
+        self._push_text()
+        self._redraw(push_text=False)
+
+    def _on_release(self, event):
+        self._drag_idx = None
+
+    # -- rendering ----------------------------------------------------
+    def _redraw(self, push_text=True):
+        if push_text:
+            self._push_text()
+        ax = self.ax
+        ax.clear()
+        ax.set_facecolor(BG)
+
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
+        span = max(xs + [0.02])
+        top = max(ys + [0.02])
+        xmax = span * 1.25 + 0.01
+        ymax = top * 1.15 + 0.01
+        xmin = -xmax * 0.18
+
+        # Body side (x < 0) shaded so orientation is obvious.
+        ax.axvspan(xmin, 0, color=CARD, alpha=0.9, zorder=0)
+        ax.axvline(0, color=MUTED, lw=1.4, zorder=3)
+        ax.text(xmin * 0.5, ymax * 0.5, "BODY", color=FAINT, fontsize=8,
+                rotation=90, ha="center", va="center", zorder=1)
+
+        # Light 5 mm grid (cap line count to avoid thousands of artists if dragged far).
+        g = self.GRID
+        max_lines = 250
+        step_x = g if (xmax / g) <= max_lines else (xmax / max_lines)
+        step_y = g if (ymax / g) <= max_lines else (ymax / max_lines)
+        gx = 0.0
+        while gx <= xmax:
+            ax.axvline(gx, color=BORDER, lw=0.4, alpha=0.6, zorder=1)
+            gx += step_x
+        gy = 0.0
+        while gy <= ymax:
+            ax.axhline(gy, color=BORDER, lw=0.4, alpha=0.6, zorder=1)
+            gy += step_y
+        # Fin polygon + vertices.
+        poly_x = xs + [xs[0]]
+        poly_y = ys + [ys[0]]
+        ax.fill(poly_x, poly_y, color=BLUE, alpha=0.35, zorder=2)
+        ax.plot(poly_x, poly_y, color=BLUE, lw=1.8, zorder=4)
+        ax.plot(xs, ys, "o", color=TEXT, markersize=7,
+                markeredgecolor=BLUE, zorder=5)
+
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(-ymax * 0.06, ymax)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("outward from body wall (m)", color=MUTED, fontsize=8)
+        ax.set_ylabel("up from y-offset (m)", color=MUTED, fontsize=8)
+        ax.tick_params(colors=MUTED, labelsize=7)
+        for spine in ax.spines.values():
+            spine.set_color(BORDER)
+        try:
+            self.canvas.figure.tight_layout()
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+        area, cr, span_m, n = self._metrics()
+        self.readout.setText(
+            f"Planform area: {area * 1e4:.1f} cm2  ({area:.5f} m2)   "
+            f"Root chord: {cr * 100:.1f} cm   Span: {span_m * 100:.1f} cm   "
+            f"Points: {n}")
+
+
+# ---------------------------------------------------------------------------
 # Part edit dialog
 # ---------------------------------------------------------------------------
 class PartEditDialog(QDialog):
@@ -586,26 +931,62 @@ class PartEditDialog(QDialog):
         self.layout = QFormLayout(self)
         self.delete_requested = False
         self.inputs = {}
+        self.numeric_keys = set()      # keys whose value must parse as a float
+        self.fin_editor = None
+        self.part_data = part_data     # same dict object the parent holds
+        self._mc = parent if hasattr(parent, "update_schematic") else None
+
+        is_fins = part_data.get("type") == "fins"
+        # Read-only, user-can't-typo fields (set via BROWSE MOTORS).
+        readonly_keys = {"motor_file", "motor_id"}
 
         for key, value in part_data.items():
             if key == "type":
                 continue
-            self.inputs[key] = QLineEdit(str(value))
-            self.layout.addRow(f"{key.replace('_', ' ').capitalize()}:", self.inputs[key])
+            # The fins "points" key is edited through the visual designer, which
+            # owns its own text field - don't add a bare row for it here.
+            if is_fins and key == "points":
+                self.fin_editor = FinShapeEditor(str(value), self)
+                self.inputs[key] = self.fin_editor.points_field
+                self.layout.addRow(self.fin_editor)
+                continue
+
+            field = QLineEdit(str(value))
+            label, tip = PART_KEY_HELP.get(
+                key, (key.replace('_', ' ').capitalize(), ""))
+            if tip:
+                field.setToolTip(tip)
+            # Numeric fields (original value is a number, not a string) get a
+            # validator + red-flag-on-bad-input; name/motor_* stay text.
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                self.numeric_keys.add(key)
+                validator = QDoubleValidator()
+                validator.setLocale(QLocale(QLocale.Language.C))
+                validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+                field.setValidator(validator)
+            if key in readonly_keys:
+                field.setReadOnly(True)
+                field.setStyleSheet(f"color: {FAINT};")
+                field.setToolTip("Set via BROWSE MOTORS - not directly editable.")
+            self.inputs[key] = field
+            self.layout.addRow(f"{label}:", field)
 
         if part_data.get("type") == "motor":
             self.motor_btn = QPushButton("BROWSE MOTORS")
             self.motor_btn.clicked.connect(self.open_motor_browser)
             self.layout.addRow("Selection", self.motor_btn)
-        elif part_data.get("type") == "fins":
-            help_text = QLabel("<small>Format: (x1,y1), (x2,y2), (x3,y3), (x4,y4)<br>"
-                               "Starts from the bottom-inner corner.</small>")
-            self.layout.addRow(help_text)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                         QDialogButtonBox.StandardButton.Cancel)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
+
+        # Live-apply: push current values into the part and redraw without closing.
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("GhostBtn")
+        self.apply_btn.clicked.connect(self.apply_changes)
+        self.apply_btn.setEnabled(self._mc is not None)
+        self.buttons.addButton(self.apply_btn, QDialogButtonBox.ButtonRole.ApplyRole)
 
         self.delete_btn = QPushButton("DELETE COMPONENT")
         self.delete_btn.setStyleSheet(f"background-color: {RED}; color: white; margin-top: 10px;")
@@ -613,6 +994,9 @@ class PartEditDialog(QDialog):
 
         self.layout.addWidget(self.buttons)
         self.layout.addWidget(self.delete_btn)
+
+        if is_fins:
+            self.resize(560, 640)
 
     def open_motor_browser(self):
         browser = MotorSelectorDialog(self)
@@ -645,7 +1029,42 @@ class PartEditDialog(QDialog):
 
     def request_delete(self):
         self.delete_requested = True
-        self.accept()
+        # Deletion should not be blocked by an unrelated invalid field.
+        QDialog.accept(self)
+
+    def _validate_numeric(self):
+        """Flag every non-parsing numeric field red. Returns True if all valid."""
+        ok = True
+        for key in self.numeric_keys:
+            widget = self.inputs[key]
+            try:
+                float(widget.text())
+                widget.setProperty("invalid", False)
+            except ValueError:
+                widget.setProperty("invalid", True)
+                ok = False
+            widget.setStyle(widget.style())
+        return ok
+
+    def accept(self):
+        # Keep the dialog open if a numeric field doesn't parse.
+        if not self._validate_numeric():
+            return
+        super().accept()
+
+    def apply_changes(self):
+        """Push current (valid) values into the live part and redraw the parent."""
+        if self._mc is None:
+            return
+        if not self._validate_numeric():
+            return
+        self.part_data.update(self.get_values())
+        self._mc.update_schematic()
+        if hasattr(self._mc, "refresh_sidebar"):
+            self._mc.refresh_sidebar()
+        if hasattr(self._mc, "set_status"):
+            self._mc.set_status(
+                f"Applied changes to {self.part_data.get('name', 'part')}.", GREEN)
 
     def get_values(self):
         results = {}
@@ -711,9 +1130,25 @@ class MissionControl(QWidget):
 
         # Templates for the builder
         self.templates = {
+            # External / aerodynamic
             "body": {"type": "body", "name": "Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04, "y_offset": 0.0},
             "nose": {"type": "nose", "name": "Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04, "y_offset": 0.3},
+            "transition": {"type": "transition", "name": "Transition", "mass": 0.03, "length": 0.05, "fore_diameter": 0.04, "aft_diameter": 0.06, "y_offset": 0.3},
+            "boattail": {"type": "boattail", "name": "Boat Tail", "mass": 0.02, "length": 0.04, "fore_diameter": 0.04, "aft_diameter": 0.025, "y_offset": 0.0},
             "fins": {"type": "fins", "name": "Fins", "mass": 0.05, "points": "(0,0), (0.1,0), (0.07,0.08), (0,0.08)", "y_offset": 0.0},
+            "launch_lug": {"type": "launch_lug", "name": "Launch Lug", "mass": 0.003, "length": 0.03, "diameter": 0.006, "y_offset": 0.12},
+            "rail_button": {"type": "rail_button", "name": "Rail Button", "mass": 0.002, "height": 0.008, "y_offset": 0.08},
+            # Internal
+            "coupler": {"type": "coupler", "name": "Coupler", "mass": 0.02, "length": 0.05, "diameter": 0.038, "y_offset": 0.28},
+            "bulkhead": {"type": "bulkhead", "name": "Bulkhead", "mass": 0.01, "thickness": 0.005, "diameter": 0.038, "y_offset": 0.2},
+            "centering_ring": {"type": "centering_ring", "name": "Centering Ring", "mass": 0.008, "thickness": 0.004, "outer_diameter": 0.038, "inner_diameter": 0.03, "y_offset": 0.05},
+            "avionics": {"type": "avionics", "name": "Avionics Bay", "mass": 0.08, "length": 0.08, "diameter": 0.038, "y_offset": 0.16},
+            "ballast": {"type": "ballast", "name": "Ballast", "mass": 0.05, "length": 0.02, "diameter": 0.03, "y_offset": 0.26},
+            # Recovery
+            "parachute": {"type": "parachute", "name": "Parachute", "mass": 0.03, "packed_length": 0.06, "packed_diameter": 0.035, "chute_diameter": 0.74, "chute_cd": 1.5, "y_offset": 0.18},
+            "streamer": {"type": "streamer", "name": "Streamer", "mass": 0.01, "packed_length": 0.04, "packed_diameter": 0.03, "strip_length": 1.0, "strip_width": 0.1, "y_offset": 0.18},
+            "shock_cord": {"type": "shock_cord", "name": "Shock Cord", "mass": 0.015, "packed_length": 0.05, "packed_diameter": 0.02, "cord_length": 3.0, "y_offset": 0.22},
+            # Propulsion
             "motor": {"type": "motor", "name": "Motor", "mass": 0.05, "length": 0.1, "diameter": 0.029, "motor_id": "None", "motor_file": "AeroTech_F40W.csv", "y_offset": 0.01},
         }
 
@@ -758,17 +1193,36 @@ class MissionControl(QWidget):
         self.controls.setFixedWidth(320)
         self.control_layout = QVBoxLayout(self.controls)
 
-        # Button grid (built ONCE, added once)
+        # Construction kit: labelled sections, each with a small button grid.
+        # 13+ flat buttons are unusable, so group them and wrap in a scroll area
+        # that caps the kit height and leaves room for the ACTIVE COMPONENTS list.
+        self.kit_scroll = QScrollArea()
+        self.kit_scroll.setWidgetResizable(True)
+        self.kit_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.kit_scroll.setMaximumHeight(300)
+        self.kit_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.btn_container = QWidget()
-        self.btn_grid = QGridLayout(self.btn_container)
-        self.btn_grid.setContentsMargins(0, 5, 0, 5)
-        self.btn_grid.setSpacing(8)
-        for i, p_type in enumerate(self.templates.keys()):
-            btn = QPushButton(f"+ {p_type.capitalize()}")
-            btn.setMinimumHeight(40)
-            btn.clicked.connect(lambda checked, t=p_type: self.add_component(t))
-            self.btn_grid.addWidget(btn, i // 2, i % 2)
-        self.control_layout.addWidget(self.btn_container)
+        kit_layout = QVBoxLayout(self.btn_container)
+        kit_layout.setContentsMargins(0, 5, 6, 5)
+        kit_layout.setSpacing(4)
+        for section, keys in KIT_SECTIONS:
+            sec_lbl = QLabel(section)
+            sec_lbl.setStyleSheet(f"color: {FAINT}; font-size: 10px; font-weight: bold; "
+                                  f"margin-top: 4px;")
+            kit_layout.addWidget(sec_lbl)
+            grid = QGridLayout()
+            grid.setSpacing(6)
+            present = [k for k in keys if k in self.templates]
+            for i, p_type in enumerate(present):
+                name = self.templates[p_type].get("name", p_type.capitalize())
+                btn = QPushButton(f"+ {name}")
+                btn.setMinimumHeight(34)
+                btn.setToolTip(PART_TOOLTIPS.get(p_type, name))
+                btn.clicked.connect(lambda checked, t=p_type: self.add_component(t))
+                grid.addWidget(btn, i // 2, i % 2)
+            kit_layout.addLayout(grid)
+        self.kit_scroll.setWidget(self.btn_container)
+        self.control_layout.addWidget(self.kit_scroll)
 
         lbl = QLabel("ACTIVE COMPONENTS")
         lbl.setStyleSheet(f"color: {FAINT}; font-weight: bold; margin-top: 6px;")
@@ -793,7 +1247,11 @@ class MissionControl(QWidget):
 
         # --- Center: schematic ---
         self.schematic_canvas = MplCanvas(width=5, height=8)
+        # Overlapping parts (motor inside body) fire one pick_event per artist for
+        # a single click. Buffer them and resolve to the single most specific part.
+        self._pick_buffer = []
         self.schematic_canvas.mpl_connect('pick_event', self.on_part_clicked)
+        self.schematic_canvas.mpl_connect('motion_notify_event', self.on_schematic_hover)
 
         # --- Right: stability + totals ---
         self.stability_panel = QGroupBox("STABILITY ANALYSIS")
@@ -882,12 +1340,55 @@ class MissionControl(QWidget):
             self.part_list_layout.addWidget(card)
 
     def on_part_clicked(self, event):
-        # Single edit path: identify the part index and delegate.
+        # One click over overlapping parts fires a pick_event per artist. Matplotlib
+        # delivers them all synchronously before returning to the Qt loop, so buffer
+        # them here and resolve once via a zero-delay timer (fires when the loop is
+        # idle again, i.e. after every pick for this click has arrived).
+        artist = getattr(event, 'artist', None)
+        if not hasattr(artist, 'part_index'):
+            return
+        schedule = not self._pick_buffer
+        self._pick_buffer.append(artist)
+        if schedule:
+            QTimer.singleShot(0, self._resolve_pick_buffer)
+
+    def _resolve_pick_buffer(self):
+        # Choose the most specific part under the cursor: the smallest patch area
+        # (motor inside a body tube, fins vs. body, etc.), then open exactly one
+        # dialog through the single edit path.
+        artists = self._pick_buffer
+        self._pick_buffer = []
+        if not artists:
+            return
+        best = min(artists, key=self._artist_area)
         try:
-            idx = int(event.artist.part_index)
+            idx = int(best.part_index)
         except (AttributeError, ValueError, TypeError):
             return
         self.open_edit_dialog_by_index(idx)
+
+    @staticmethod
+    def _artist_area(artist):
+        # Approximate area of a patch from its data-space bounding box; smaller
+        # means more specific / deeper in the stack.
+        try:
+            bbox = artist.get_extents()
+            return abs(bbox.width * bbox.height)
+        except Exception:
+            return float('inf')
+
+    def on_schematic_hover(self, event):
+        # Subtle affordance: pointing-hand cursor over a clickable part, arrow
+        # otherwise. No redraws - just a cheap contains() test per patch.
+        over_part = False
+        if event.inaxes is self.schematic_canvas.axes:
+            for patch in self.schematic_canvas.axes.patches:
+                if hasattr(patch, 'part_index') and patch.contains(event)[0]:
+                    over_part = True
+                    break
+        shape = Qt.CursorShape.PointingHandCursor if over_part else Qt.CursorShape.ArrowCursor
+        if self.schematic_canvas.cursor().shape() != shape:
+            self.schematic_canvas.setCursor(QCursor(shape))
 
     def open_edit_dialog_by_index(self, idx):
         if not (0 <= idx < len(self.rocket_components)):
@@ -903,6 +1404,33 @@ class MissionControl(QWidget):
                 self.set_status(f"Updated {part.get('name', 'part')}.", GREEN)
             self.update_schematic()
             self.refresh_sidebar()
+
+    @staticmethod
+    def _part_length(part):
+        """Axial (vertical) extent of a part in metres, from whichever key it uses.
+
+        Parts don't all carry a 'length' key: bulkheads/rings use 'thickness',
+        rail buttons use 'height', recovery gear uses 'packed_length'. Returns 0.0
+        for parts with no meaningful axial extent."""
+        for k in ("length", "packed_length", "thickness", "height"):
+            if k in part:
+                try:
+                    return float(part[k])
+                except (ValueError, TypeError):
+                    return 0.0
+        return 0.0
+
+    @staticmethod
+    def _part_width(part, default=0.04):
+        """Radial extent (diameter) of a part in metres, from whichever key it uses."""
+        for k in ("diameter", "packed_diameter", "outer_diameter",
+                  "aft_diameter", "fore_diameter"):
+            if k in part:
+                try:
+                    return float(part[k])
+                except (ValueError, TypeError):
+                    return default
+        return default
 
     def _body_radius(self):
         for p in self.rocket_components:
@@ -936,18 +1464,41 @@ class MissionControl(QWidget):
             ptype = part.get("type")
             try:
                 y0 = float(part.get("y_offset", 0))
-                w = float(part.get("diameter", 0.04))
-                h = float(part.get("length", 0))
             except (ValueError, TypeError):
                 continue
+            h = self._part_length(part)
+            w = self._part_width(part)
             max_height = max(max_height, y0 + h)
 
+            # zorder stacks the body lowest (1), then external/internal parts (2),
+            # motor on top (3) so the innermost part is drawn - and clicked - on
+            # top of whatever contains it. The smallest-area pick then wins.
             shape = None
             if ptype == "body":
-                shape = Rectangle((-w / 2, y0), w, h, color=CARD, ec=BLUE, lw=2, picker=True)
+                shape = Rectangle((-w / 2, y0), w, h, color=CARD, ec=BLUE, lw=2,
+                                  picker=True, zorder=1)
             elif ptype == "nose":
                 shape = Polygon([[-w / 2, y0], [w / 2, y0], [0, y0 + h]],
-                                color=BLUE, ec='white', lw=1, picker=True)
+                                color=BLUE, ec='white', lw=1, picker=True, zorder=2)
+            elif ptype in ("transition", "boattail"):
+                try:
+                    df = float(part.get("fore_diameter", w))
+                    da = float(part.get("aft_diameter", w))
+                except (ValueError, TypeError):
+                    df, da = w, w
+                # y grows toward the nose, so 'fore' is the top edge, 'aft' the bottom.
+                shape = Polygon([[-da / 2, y0], [da / 2, y0],
+                                 [df / 2, y0 + h], [-df / 2, y0 + h]],
+                                color=CARD, ec=BLUE, lw=2, picker=True, zorder=2)
+            elif ptype == "launch_lug":
+                # Small tube against the right-hand body wall.
+                shape = Rectangle((r_body, y0), max(w, 0.003), h,
+                                  color="#52525b", ec=MUTED, lw=1, picker=True, zorder=2)
+            elif ptype == "rail_button":
+                # Tiny square standoff on the body wall (uses 'height').
+                s = h if h > 0 else 0.008
+                shape = Rectangle((r_body, y0), s, s,
+                                  color=MUTED, ec=TEXT, lw=0.5, picker=True, zorder=2)
             elif ptype == "fins":
                 try:
                     raw = parse_fin_points(part["points"])
@@ -957,16 +1508,28 @@ class MissionControl(QWidget):
                 right = [[p[0] + r_body, p[1] + y0] for p in raw]
                 left = [[-p[0] - r_body, p[1] + y0] for p in raw]
                 for pts in (right, left):
-                    poly = Polygon(pts, color=BLUE, alpha=0.75, picker=True)
+                    poly = Polygon(pts, color=BLUE, alpha=0.75, picker=True, zorder=2)
                     poly.part_index = i
                     ax.add_patch(poly)
                 max_height = max(max_height, y0 + max(p[1] for p in raw))
                 continue
+            elif ptype in INTERNAL_TYPES:
+                # Internal parts: dashed edge, low alpha, drawn inside the body
+                # outline so the user can see they sit within the airframe.
+                col = {
+                    "avionics": AMBER, "ballast": RED, "coupler": MUTED,
+                    "bulkhead": MUTED, "centering_ring": MUTED,
+                    "parachute": GREEN, "streamer": GREEN, "shock_cord": GREEN,
+                }.get(ptype, MUTED)
+                iw = min(w, 2 * r_body) if r_body > 0 else w
+                ih = h if h > 0 else 0.004
+                shape = Rectangle((-iw / 2, y0), iw, ih, facecolor=col, alpha=0.28,
+                                  ec=col, ls='--', lw=1.2, picker=True, zorder=2)
             elif ptype == "motor":
                 shape = Rectangle((-w / 2, max(y0, 0.0)), w, h,
-                                  color="#52525b", ec=MUTED, lw=1, picker=True)
+                                  color="#52525b", ec=MUTED, lw=1, picker=True, zorder=3)
                 ax.text(0, y0 + h / 2, str(part.get("motor_id", "")), color='white',
-                        ha='center', va='center', fontsize=7, fontweight='bold')
+                        ha='center', va='center', fontsize=7, fontweight='bold', zorder=4)
 
             if shape is not None:
                 shape.part_index = i
@@ -993,12 +1556,15 @@ class MissionControl(QWidget):
                 m = 0.0
             try:
                 y0 = float(p.get("y_offset", 0))
-                length = float(p.get("length", 0))
             except (ValueError, TypeError):
-                y0, length = 0.0, 0.0
+                y0 = 0.0
+            length = self._part_length(p)
             dry += m
             moment += m * (y0 + length / 2)
-            top = max(top, y0 + length)
+            # Only airframe parts extend the overall length; internal gear, side
+            # lugs/buttons and recovery packing must not inflate "Total length".
+            if p.get("type") in AIRFRAME_TYPES:
+                top = max(top, y0 + length)
             if p.get("type") == "motor":
                 try:
                     prop += float(p.get("propellant_mass", 0))
@@ -1033,45 +1599,71 @@ class MissionControl(QWidget):
         r = self._body_radius()
         d = 2 * r
 
+        # Accumulate (CNa, CP-from-nose) terms and take the normal-force-weighted
+        # mean. With no transitions/boattails this reduces exactly to the previous
+        # nose(+fins) result.
         # Nose cone: CNa = 2, CP at ~2/3 of the nose length from the tip (conical)
         cn_nose = 2.0
         x_nose = (2.0 / 3.0) * nose_len
-        if fins is None or d <= 0:
-            return x_nose
+        terms = [(cn_nose, x_nose)]
 
-        try:
-            pts = parse_fin_points(fins.get("points", ""))
-            fin_y0 = float(fins.get("y_offset", 0))
-        except Exception:
-            return x_nose
+        # Fin set (unchanged geometry; skipped rather than early-returning so
+        # transition terms can still contribute).
+        fin_term = None
+        if fins is not None and d > 0:
+            try:
+                pts = parse_fin_points(fins.get("points", ""))
+                fin_y0 = float(fins.get("y_offset", 0))
+                xs = [p[0] for p in pts]
+                span = max(xs)
+                root_ys = [p[1] for p in pts if p[0] <= 0.05 * span]
+                tip_ys = [p[1] for p in pts if p[0] >= 0.95 * span]
+                cr = (max(root_ys) - min(root_ys)) if root_ys else 0.0
+                ct = (max(tip_ys) - min(tip_ys)) if tip_ys else 0.0
+                if span > 0 and root_ys and cr + ct > 0:
+                    root_le_from_nose = total_len - (fin_y0 + max(root_ys))
+                    tip_le_y = max(tip_ys) if tip_ys else min(p[1] for p in pts)
+                    m_sweep = max(0.0, max(root_ys) - tip_le_y)
+                    n_fins = 4
+                    l_mid = float(np.hypot(span, m_sweep + ct / 2.0 - cr / 2.0))
+                    cn_fins = (1 + r / (span + r)) * (4.0 * n_fins * (span / d) ** 2) / \
+                        (1 + np.sqrt(1 + (2.0 * l_mid / (cr + ct)) ** 2))
+                    x_fins = root_le_from_nose + (m_sweep / 3.0) * (cr + 2 * ct) / (cr + ct) + \
+                        (1.0 / 6.0) * ((cr + ct) - (cr * ct) / (cr + ct))
+                    fin_term = (cn_fins, x_fins)
+            except Exception:
+                fin_term = None
+        if fin_term is not None:
+            terms.append(fin_term)
 
-        xs = [p[0] for p in pts]
-        span = max(xs)
-        if span <= 0:
-            return x_nose
-        # Root chord: vertical extent near the body (x ~ 0); tip chord near max span.
-        root_ys = [p[1] for p in pts if p[0] <= 0.05 * span]
-        tip_ys = [p[1] for p in pts if p[0] >= 0.95 * span]
-        if not root_ys:
-            return x_nose
-        cr = max(root_ys) - min(root_ys)
-        ct = (max(tip_ys) - min(tip_ys)) if tip_ys else 0.0
-        if cr + ct <= 0:
-            return x_nose
+        # Transitions and boattails (conical Barrowman body term). Reference
+        # diameter d is the body diameter; 'fore' faces the nose, 'aft' the tail.
+        if d > 0:
+            for p in self.rocket_components:
+                if p.get("type") not in ("transition", "boattail"):
+                    continue
+                try:
+                    df = float(p.get("fore_diameter"))
+                    da = float(p.get("aft_diameter"))
+                    L = self._part_length(p)
+                    y0 = float(p.get("y_offset", 0))
+                except (ValueError, TypeError):
+                    continue
+                if df <= 0 or da <= 0 or df == da:
+                    continue
+                cn_t = 2.0 * ((da / d) ** 2 - (df / d) ** 2)
+                x0 = total_len - (y0 + L)  # forward end distance from the nose tip
+                ratio = df / da
+                denom = 1.0 - ratio ** 2
+                if abs(denom) < 1e-9:
+                    continue
+                x_t = x0 + (L / 3.0) * (1.0 + (1.0 - ratio) / denom)
+                terms.append((cn_t, x_t))
 
-        # Builder y grows upward from the tail; convert to distance-from-nose.
-        root_le_from_nose = total_len - (fin_y0 + max(root_ys))
-        tip_le_y = max(tip_ys) if tip_ys else min(p[1] for p in pts)
-        m_sweep = max(0.0, max(root_ys) - tip_le_y)  # leading-edge sweep along the body axis
-
-        n_fins = 4
-        l_mid = float(np.hypot(span, m_sweep + ct / 2.0 - cr / 2.0))  # mid-chord line
-        cn_fins = (1 + r / (span + r)) * (4.0 * n_fins * (span / d) ** 2) / \
-            (1 + np.sqrt(1 + (2.0 * l_mid / (cr + ct)) ** 2))
-        x_fins = root_le_from_nose + (m_sweep / 3.0) * (cr + 2 * ct) / (cr + ct) + \
-            (1.0 / 6.0) * ((cr + ct) - (cr * ct) / (cr + ct))
-
-        return float((cn_nose * x_nose + cn_fins * x_fins) / (cn_nose + cn_fins))
+        cn_sum = sum(c for c, _ in terms)
+        if cn_sum == 0:
+            return None
+        return float(sum(c * x for c, x in terms) / cn_sum)
 
     def _fin_planform_area(self):
         """Shoelace area of one fin polygon, or None."""
@@ -1119,10 +1711,30 @@ class MissionControl(QWidget):
                 if p.get("motor_file"):
                     self.env_inputs["Motor File"].setText(str(p["motor_file"]))
                 break
+        # Parachute part -> recovery config (canopy diameter + drag coefficient)
+        chute = next((p for p in self.rocket_components
+                      if p.get("type") == "parachute"), None)
+        chute_msg = ""
+        if chute is not None:
+            try:
+                cd_dia = float(chute.get("chute_diameter", 0))
+                if cd_dia > 0:
+                    self.rec_inputs["Chute Dia (m)"].setText(f"{cd_dia:.3f}")
+            except (ValueError, TypeError):
+                pass
+            try:
+                cd_cd = float(chute.get("chute_cd", 0))
+                if cd_cd > 0:
+                    self.rec_inputs["Chute Cd"].setText(f"{cd_cd:.3f}")
+            except (ValueError, TypeError):
+                pass
+            chute_msg = " Parachute pushed to recovery config."
         self.update_stability_gauge()
         extra = " CP estimated via Barrowman." if cp is not None else \
             " Add a nose cone for a CP estimate."
-        self.set_status(f"Flight config updated from builder (mass, length, CG, diameter).{extra}", GREEN)
+        self.set_status(
+            f"Flight config updated from builder (mass, length, CG, diameter)."
+            f"{extra}{chute_msg}", GREEN)
 
     # ==================================================================
     # FLIGHT TAB
