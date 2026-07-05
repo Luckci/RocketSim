@@ -271,8 +271,8 @@ class RocketSim:
             # We zero the lateral acceleration components (a pure constraint expressed
             # through the returned derivative). Because the rocket starts with zero
             # lateral velocity, this keeps vx/vz at exactly zero without mutating state.
-            accel[0] = 0 # No lateral X movement
-            accel[2] = 0 # No Lateral Z movement
+            rail_axis = thrust_dir / (np.linalg.norm(thrust_dir) + 1e-9)
+            accel = np.dot(accel, rail_axis) * rail_axis
 
             ang_accel = np.array([0.0, 0.0, 0.0])
         else:
