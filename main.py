@@ -13,7 +13,7 @@ def get_path(subfolder, filename):
 
 DIRS = ["data", "motors", "assets/models", "assets/textures", "config"]
 for d in DIRS:
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(os.path.join(BASE_DIR, d), exist_ok=True)
 
 class RocketSim: 
     def __init__(self, config_path):
@@ -23,12 +23,20 @@ class RocketSim:
 
         # Physical Constants
         self.g = 9.81
-        self.rho = 1.225
+        # Sea-level reference air density (from GUI config, default standard atmosphere)
+        self.rho0 = float(config.get("Air Density (kg/m³)", 1.225))
+        self.rho = self.rho0
 
         # --- Motor Data Loading ---
         # Get the motor file path directly from the GUI input
-        motor_file = config["Motor File"]
+        motor_file = config.get("Motor File", "")
         motor_path = os.path.join(BASE_DIR, "motors", motor_file)
+
+        if not os.path.isfile(motor_path):
+            raise FileNotFoundError(
+                f"Motor file not found: {motor_path}. "
+                f"Check the 'Motor File' entry in the config and that the file exists in the motors/ folder."
+            )
 
         motor_data = pd.read_csv(motor_path, skiprows=4)
         self.thrust_time = motor_data["Time (s)"].values
@@ -45,14 +53,17 @@ class RocketSim:
         # Calculate Cross Sectional area automatically from input diameter
         self.area = np.pi * (self.diameter / 2)**2 
         
-        self.cd = 0.5 # Can be moved to GUI later if desired
+        # Airframe drag coefficient (optional GUI input; 0.5 is a typical slender rocket)
+        self.cd = float(config.get("Drag Coefficient", 0.5))
         self.cp_dist = float(config["CP Dist (m)"])
         self.cg_dist = float(config["CG Dist (m)"])
         self.fin_area = float(config["Fin Area (m\u00b2)"])
         
         # Environment & Launch Config
-        self.rail_length = float(config["Rail Length (m)"])
-        self.wind_speed_ms = float(config["Wind Speed (m/s)"])
+        self.rail_length = float(config.get("Rail Length (m)", 1.5))
+        self.wind_speed_ms = float(config.get("Wind Speed (m/s)", 0.0))
+        # Rail angle: 90 deg = perfectly vertical. Deviation from vertical is the tilt.
+        self.rail_angle_deg = float(config.get("Rail Angle (°)", 90.0))
 
         # Recovery System from JSON
         self.parachute_diameter = float(config.get("Chute Dia (m)", 0.74))
@@ -62,7 +73,10 @@ class RocketSim:
         self.target_impact_velocity = 5.0 
 
         # Calculated Constants
-        self.isp = self.total_impulse / (self.mass_fueled * self.g)
+        if self.mass_fueled > 0:
+            self.isp = self.total_impulse / (self.mass_fueled * self.g)
+        else:
+            self.isp = 1.0  # Guard against division by zero for a zero-propellant config
 
         # Simulation State Variables
         self.dt = 0.01              
@@ -72,7 +86,9 @@ class RocketSim:
         self.acceleration = 0
         self.impact_velocity = 0
         self.decent_time = 0
-        self.apogee_time = 0 
+        self.apogee_time = 0
+        self.apogee_altitude = 0.0  # Guard: assigned when apogee is detected
+        self.rail_departed = False  # Latches True once the rocket has left the rail
         self.max_shock_force_n = 0
         self.shock_factor = 1.5 
         self.max_velocity = 0
@@ -109,7 +125,7 @@ class RocketSim:
 
     def get_air_density (self, altitude):
         # Constant for the standard atmosphere model
-        P0 = 101325.0   # Standard preasure (Pa) at sea level
+        P0 = 101325.0   # Standard pressure (Pa) at sea level
         T0 = 288.15     # Standard temperature (K) at sea level
         L = 0.0065      # Lapse rate of temperature (K/m)
         R = 287.05      # The specific gas constant for dry air (J/(kg*K))
@@ -117,15 +133,18 @@ class RocketSim:
         # Calculations for the temperature at altitude
         T = T0 - L * altitude
 
-        # Ensure it cant go belov absolute zero (safery feature)
+        # Ensure it cant go below absolute zero (safety feature)
         if T <= 0: return 0
 
-        # Calculations for the preasure at altitude
+        # Calculations for the pressure at altitude
         # Formula: P = P0 * (1 - L*h / T0)^(g / (R*L))
-        preasure = P0 * (1 - (L * altitude) / T0)**(self.g / (R * L))
+        pressure = P0 * (1 - (L * altitude) / T0)**(self.g / (R * L))
 
         # Calculate the density: rho = P / (R * T)
-        rho = preasure / (R * T)
+        rho = pressure / (R * T)
+
+        # Scale by the user-supplied sea-level density (defaults to 1.225 = no change)
+        rho *= self.rho0 / 1.225
         return rho
     
     def get_speed_of_sound(self, altitude):
@@ -156,7 +175,9 @@ class RocketSim:
 
     def quat_to_euler(self, q):
         w, x, y, z = q
-        pitch = np.arcsin(2.0 * (w*y - z*y))
+        # Clamp the arcsin argument to [-1, 1] to avoid NaN from floating point drift
+        sin_pitch = np.clip(2.0 * (w*y - z*x), -1.0, 1.0)
+        pitch = np.arcsin(sin_pitch)
         yaw = np.arctan2(2.0 * (w*z + x*y), 1.0 - 2.0 * (y*y + z*z))
         return np.array([pitch, yaw])
 
@@ -215,15 +236,20 @@ class RocketSim:
         local_wind = self.wind_speed_ms * (altitude / 10.0)**0.14
 
         # Rail logic
+        # The rocket is only "on the rail" during the initial ascent (before it has
+        # travelled the rail length and before apogee). The rail_departed flag latches
+        # True in the main loop so this can never re-trigger near landing when the
+        # position norm shrinks back down.
         dist_traveled = np.linalg.norm(pos)
-        on_rail = dist_traveled < self.rail_length
+        on_rail = (dist_traveled < self.rail_length) and (not self.rail_departed) and (self.apogee_time == 0)
 
-        if on_rail and self.apogee_time == 0:
+        if on_rail:
             v_rel = vel # Ignore wind speed while on the rail
         else:
             v_rel = vel - np.array([local_wind, 0, 0]) # include the wind in the calculations
 
         # Drag Logic
+        v_rel_mag = np.linalg.norm(v_rel)
         v_mag_sq = np.dot(v_rel, v_rel)
 
         if not self.parachute_deployed:
@@ -234,18 +260,20 @@ class RocketSim:
             current_area = self.parachute_area
 
         drag_mag = 0.5 * rho * v_mag_sq * current_cd * current_area
-        F_drag = - (v_rel / (v_mag + 1e-6)) * drag_mag 
+        # Drag opposes the relative velocity; normalize by the norm of v_rel (not vel).
+        F_drag = - (v_rel / (v_rel_mag + 1e-6)) * drag_mag
 
         # Acceleration
         accel = (F_gravity + F_thrust + F_drag) / current_total_mass
 
         if on_rail:
-            # only allow movement on the Y axis as long as we are on the rail
-            accel[0] = 0 # No lateral X movement
-            accel[2] = 0 # No Lateral Z movement
-            state[3] = 0 # Force X velocity to 0
-            state[5] = 0 # Force Z velocity to 0
-            
+            # Only allow movement on the Y axis as long as we are on the rail.
+            # We zero the lateral acceleration components (a pure constraint expressed
+            # through the returned derivative). Because the rocket starts with zero
+            # lateral velocity, this keeps vx/vz at exactly zero without mutating state.
+            rail_axis = thrust_dir / (np.linalg.norm(thrust_dir) + 1e-9)
+            accel = np.dot(accel, rail_axis) * rail_axis
+
             ang_accel = np.array([0.0, 0.0, 0.0])
         else:
             # Standard 6-DOF ang_accel
@@ -309,7 +337,7 @@ class RocketSim:
         # Standard safety factor in rocketry is 3x to 5x
         safety_margin = 3
         required_strength = force_kgf * safety_margin
-        print(f"Suggested Cord Strenth ({safety_margin}x Safety): {required_strength:.2f} kgf")
+        print(f"Suggested Cord Strength ({safety_margin}x Safety): {required_strength:.2f} kgf")
 
         # Material Advice Logic
         print("MATERIAL ADVICE:")
@@ -318,23 +346,25 @@ class RocketSim:
         elif 5 <= force_kgf < 15:
             print("-> 150kg-test Kevlar: Recommended. Use a 'shock absorber' loop to protect the airframe.")
         else:
-            print("-> 350kg-test Kevlar: High load detected! Ensure the mount pount in the motor tube is reinforced.")
+            print("-> 350kg-test Kevlar: High load detected! Ensure the mount point in the motor tube is reinforced.")
 
         if self.parachute_delay > 2.0:
             print("NOTE: Your high shock force is due to the long deployment delay. The rocket is falling fast when the chute opens!")
 
         # STABILITY ANALYSIS
         print("\n--- STABILITY ANALYSIS ---")
-        print(f"Center of Preassure (CP): {self.cp_dist:.3f} m")
+        print(f"Center of Pressure (CP): {self.cp_dist:.3f} m")
         print(f"Center of Gravity (CG): {self.cg_dist:.3f} m")
         print(f"Static Stability Margin: {self.initial_stability_calibers:.2f} calibers")
 
         if self.initial_stability_calibers < 1.0:
             print("WARNING: Rocket may be unstable! Move CG forward (add nose weight).")
-        elif self.initial_stability_calibers > 3.0:
-            print("ADVICE: Rocket is over stable. It might 'weather cock' (tilt) heavily in wind.")
+        elif self.initial_stability_calibers <= 2.0:
+            print("SUCCESS: Stability margin is optimal (1-2 calibers).")
+        elif self.initial_stability_calibers <= 3.0:
+            print("ACCEPTABLE: Slightly overstable (2-3 calibers). May weathercock in wind.")
         else:
-            print("SUCCESS: Stability margin is within the safe range (1-2 calibers).")
+            print("ADVICE: Rocket is over stable (>3 calibers). It might 'weather cock' (tilt) heavily in wind.")
 
     def run(self):
         print("Running 6-DOF SITL Simulation...")
@@ -347,17 +377,28 @@ class RocketSim:
         # [px, py, pz, vx, vy, vz, qw, qx, qy, qz, wx, wy, wz, fuel_mass]
         # We start at (0,0,0) pointing straight up (qw=1) with full fuel
 
-        # Direct straight
-        #state = np.array([0.0, 0.0, 0.0,  0.0, 0.0, 0.0,  1.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,  self.mass_fueled])
+        # Initial orientation from the launch rail angle.
+        # Rail Angle 90 deg = perfectly vertical. The deviation from vertical is the
+        # tilt, applied as a rotation about the body X axis:
+        #   quat = [cos(theta/2), sin(theta/2), 0, 0]
+        tilt_rad = np.radians(90.0 - self.rail_angle_deg)
+        half = tilt_rad / 2.0
+        init_quat = np.array([np.cos(half), np.sin(half), 0.0, 0.0])
+        init_quat /= np.linalg.norm(init_quat)
 
-        # Tiny Tilt
-        state = np.array([0.0, 0.0, 0.0,  0.0, 0.0, 0.0,  0.999, 0.05, 0.0, 0.0,  0.0, 0.0, 0.0,  self.mass_fueled])
-        
-        # 2 degree lean
-        #state = np.array([0, 0, 0,  0, 0, 0,  0.9998, 0.02, 0.0, 0.0,  0, 0, 0, self.mass_fueled])
+        state = np.array([0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+                          init_quat[0], init_quat[1], init_quat[2], init_quat[3],
+                          0.0, 0.0, 0.0,  self.mass_fueled])
+
         self.time = 0
         self.parachute_deployed = False
         self.apogee_time = 0
+        self.rail_departed = False
+        # Liftoff latch: many real thrust curves ramp up over the first few tens
+        # of milliseconds, during which thrust < weight. The launch pad holds the
+        # rocket until thrust wins - without this, the integrator lets the rocket
+        # "sink" below ground and the apogee detector fires on the pad.
+        self.liftoff = False
 
         self.max_velocity = 0
         self.max_mach = 0
@@ -368,8 +409,19 @@ class RocketSim:
                     "yaw": [], "thrust": [], "fin_x": [], "fin_y": [],
                     "recov_d": []}
 
+        # Hard cap on simulated time to avoid an infinite loop for degenerate configs
+        # (e.g. a motor that never lifts the rocket off the pad).
+        MAX_SIM_TIME = 600.0  # seconds of simulated flight
+        hit_time_cap = False
+
         # Simulation loop
         while self.time < 0.1 or state[1] >= 0:
+
+            if self.time > MAX_SIM_TIME:
+                hit_time_cap = True
+                print(f"WARNING: Simulation exceeded the {MAX_SIM_TIME:.0f}s time cap. "
+                      f"The rocket may never have left the pad (check thrust vs. mass). Aborting loop.")
+                break
 
             # Sensor read (SITL)
             # Convert current Quaternion to Eurler so the PID can understand it 
@@ -391,14 +443,31 @@ class RocketSim:
             # Quaternions must always have a magnitude of 1
             state[6:10] /= np.linalg.norm(state[6:10])
 
+            # Launch pad constraint: before liftoff the ground supports the rocket,
+            # so it can never move below the pad or build downward velocity while
+            # the motor is still spooling up.
+            if not self.liftoff:
+                if state[1] > 0 and state[4] > 0:
+                    self.liftoff = True
+                else:
+                    state[0:3] = 0.0            # pinned to the pad
+                    state[3:6] = 0.0            # no velocity on the pad
+                    state[1] = 0.0
+
+            # Latch rail departure once the rocket has cleared the rail during ascent.
+            # This prevents the rail constraint from re-engaging near landing when the
+            # position norm shrinks again.
+            if (not self.rail_departed) and np.linalg.norm(state[0:3]) >= self.rail_length:
+                self.rail_departed = True
+
             # Post Step logic (Apogee & Recovery)
             v_mag = np.linalg.norm(state[3:6])
             if v_mag > self.max_velocity:
                 self.max_velocity = v_mag
                 self.max_mach = v_mag / self.get_speed_of_sound(state[1])
 
-            # Apogee detection
-            if state[4] < 0 and self.apogee_time == 0:
+            # Apogee detection (only meaningful after liftoff)
+            if self.liftoff and state[4] < 0 and self.apogee_time == 0:
                 self.apogee_time = self.time
                 self.apogee_altitude = state[1]
 
@@ -434,6 +503,12 @@ class RocketSim:
                 self.impact_velocity = v_mag
                 self.decent_time = self.time - self.apogee_time
                 break
+
+        # If we bailed out via the time cap (degenerate config that never landed),
+        # still populate the summary fields with sensible values.
+        if hit_time_cap:
+            self.impact_velocity = float(np.linalg.norm(state[3:6]))
+            self.decent_time = self.time - self.apogee_time
 
         print(f"6-DOF Simulation complete. Impact at {self.time:.2f}s")
 
@@ -505,10 +580,12 @@ class RocketSim:
         # Generate Stability Status
         if self.initial_stability_calibers < 1.0:
             stab_status = "DANGEROUS: Rocket may be unstable! Add nose weight."
-        elif self.initial_stability_calibers > 3.0:
-            stab_status = "WARNING: Overstable. May weathercock heavily."
-        else:
+        elif self.initial_stability_calibers <= 2.0:
             stab_status = "SAFE: Stability margin is optimal (1-2 cal)."
+        elif self.initial_stability_calibers <= 3.0:
+            stab_status = "ACCEPTABLE: Slightly overstable (2-3 cal). May weathercock in wind."
+        else:
+            stab_status = "WARNING: Overstable (>3 cal). May weathercock heavily."
 
         report_data = {
             # Flight Stats - Explicitly cast to float to avoid numpy errors
@@ -575,7 +652,7 @@ class FlightComputerSITL:
         output = np.clip(output, -15, 15)
         return output
     
-    def get_servo_ouputs(pitch_cmd, yaw_cmd, roll_cmd=0):
+    def get_servo_outputs(self, pitch_cmd, yaw_cmd, roll_cmd=0):
         # pitch_cmd and yaw_cmd comes from the PID loop
 
         # Standard 4 fin mixing (plus configuration)
@@ -590,6 +667,14 @@ if __name__ == "__main__":
 
     # Check if a config file is passed via command line
     config_file = sys.argv[1] if len(sys.argv) > 1 else "rocket_config.json"
+
+    # Resolve the config path robustly: honour it as given (absolute or relative to the
+    # current working directory), but fall back to the one next to this script so the
+    # simulator works regardless of the directory it is launched from.
+    if not os.path.isfile(config_file):
+        fallback = os.path.join(BASE_DIR, os.path.basename(config_file))
+        if os.path.isfile(fallback):
+            config_file = fallback
 
     sim = RocketSim(config_file)
     sim.run()

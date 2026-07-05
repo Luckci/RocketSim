@@ -1,3 +1,4 @@
 flight_data.csv
 flight_report.json
 control_system_data.csv
+__pycache__/
