@@ -74,7 +74,7 @@ PART_KEY_HELP = {
                  "Axial position of the part's lower end, measured up from the tail (m)."),
     "fore_diameter": ("Fore diameter (m)", "Diameter at the forward, nose-facing end (m)."),
     "aft_diameter": ("Aft diameter (m)", "Diameter at the aft, tail-facing end (m)."),
-    "height": ("Height (m)", "Standoff height from the body wall (m)."),
+    "height": ("Height (m)", "Axial extent of the part along the rocket axis (m)."),
     "thickness": ("Thickness (m)", "Axial thickness of the disc (m)."),
     "outer_diameter": ("Outer diameter (m)", "Outer diameter of the ring (m)."),
     "inner_diameter": ("Inner diameter (m)", "Inner bore diameter of the ring (m)."),
