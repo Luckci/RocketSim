@@ -3,6 +3,7 @@ import os
 import json
 import ast
 import csv
+import copy
 import subprocess
 
 import numpy as np
@@ -86,6 +87,7 @@ PART_KEY_HELP = {
     "strip_width": ("Strip width (m)", "Width of the streamer strip (m)."),
     "cord_length": ("Cord length (m)", "Deployed shock-cord length (m)."),
     "propellant_mass": ("Propellant mass (kg)", "Propellant mass burned during thrust (kg)."),
+    "shape": ("Nose shape", "Nose profile: conical, tangent ogive, or elliptical."),
 }
 
 # Per-part-type one-line description used for the CONSTRUCTION KIT button tooltips.
@@ -125,6 +127,10 @@ AIRFRAME_TYPES = {"body", "nose", "transition", "boattail", "motor"}
 INTERNAL_TYPES = {"coupler", "bulkhead", "centering_ring", "avionics", "ballast",
                   "parachute", "streamer", "shock_cord"}
 
+# Selectable nose-cone profiles. Older saved projects have no "shape" key; the
+# drawing / CP code defaults them to "conical" for backward compatibility.
+NOSE_SHAPES = ["conical", "ogive", "elliptical"]
+
 # ---------------------------------------------------------------------------
 # Theme
 # ---------------------------------------------------------------------------
@@ -142,23 +148,46 @@ RED = "#ef4444"
 
 MODERN_STYLE = f"""
 QWidget {{ background-color: {BG}; color: {MUTED}; font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 12px; }}
-QGroupBox {{ border: 1px solid {BORDER}; border-radius: 8px; margin-top: 16px; padding: 12px 10px 10px 10px; font-weight: bold; color: {TEXT}; }}
-QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 4px; }}
-QLineEdit {{ background: transparent; border: none; border-bottom: 1px solid {BORDER}; padding: 4px; color: {BLUE}; font-weight: bold; }}
-QLineEdit:focus {{ border-bottom: 2px solid {BLUE}; }}
-QLineEdit[invalid="true"] {{ border-bottom: 2px solid {RED}; color: {RED}; }}
-QPushButton {{ background-color: #1d4ed8; color: white; border-radius: 6px; padding: 8px; font-size: 11px; font-weight: bold; }}
+QLabel {{ background: transparent; }}
+QGroupBox {{ border: 1px solid {BORDER}; border-radius: 10px; margin-top: 16px; padding: 14px 10px 10px 10px; font-weight: bold; color: {TEXT}; }}
+QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; left: 10px; padding: 0 4px; color: {BLUE}; letter-spacing: 1px; }}
+QLineEdit {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 6px; padding: 5px 8px; color: {TEXT}; font-weight: 600; selection-background-color: {BLUE}; }}
+QLineEdit:hover {{ border: 1px solid #3f3f46; }}
+QLineEdit:focus {{ border: 1px solid {BLUE}; }}
+QLineEdit:read-only {{ color: {FAINT}; }}
+QLineEdit[invalid="true"] {{ border: 1px solid {RED}; color: {RED}; }}
+QComboBox {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 6px; padding: 5px 8px; color: {TEXT}; font-weight: 600; }}
+QComboBox:hover {{ border: 1px solid #3f3f46; }}
+QComboBox:focus {{ border: 1px solid {BLUE}; }}
+QComboBox::drop-down {{ border: none; width: 20px; }}
+QComboBox QAbstractItemView {{ background: {PANEL}; color: {TEXT}; border: 1px solid {BORDER}; selection-background-color: {BLUE}; selection-color: white; }}
+QPushButton {{ background-color: #1d4ed8; color: white; border-radius: 7px; padding: 8px 10px; font-size: 11px; font-weight: bold; }}
 QPushButton:hover {{ background-color: {BLUE}; }}
+QPushButton:pressed {{ background-color: #1e40af; }}
 QPushButton:disabled {{ background-color: {BORDER}; color: {FAINT}; }}
 QPushButton#LaunchBtn {{ background-color: #059669; }}
 QPushButton#LaunchBtn:hover {{ background-color: {GREEN}; }}
 QPushButton#RunBtn {{ background-color: #1d4ed8; font-size: 13px; padding: 11px; }}
-QPushButton#GhostBtn {{ background-color: {BORDER}; color: {TEXT}; }}
-QPushButton#GhostBtn:hover {{ background-color: #3f3f46; }}
+QPushButton#GhostBtn {{ background-color: transparent; color: {TEXT}; border: 1px solid {BORDER}; }}
+QPushButton#GhostBtn:hover {{ background-color: #27272a; border: 1px solid #3f3f46; }}
 QLabel#Header {{ color: white; font-size: 15px; font-weight: 800; }}
-QCheckBox {{ spacing: 6px; }}
+QCheckBox {{ background: transparent; spacing: 8px; }}
+QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; background: {CARD}; border: 1px solid {BORDER}; }}
+QCheckBox::indicator:hover {{ border: 1px solid {BLUE}; }}
+QCheckBox::indicator:checked {{ background: {BLUE}; border: 1px solid {BLUE}; }}
 QScrollArea {{ border: none; }}
-QToolTip {{ background-color: {PANEL}; color: {TEXT}; border: 1px solid {BORDER}; padding: 4px; }}
+QScrollBar:vertical {{ background: transparent; width: 9px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: #3f3f46; border-radius: 4px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: #52525b; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 0; }}
+QScrollBar::handle:horizontal {{ background: #3f3f46; border-radius: 4px; min-width: 24px; }}
+QScrollBar::handle:horizontal:hover {{ background: #52525b; }}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+QTabWidget::pane {{ border: 1px solid {BORDER}; border-radius: 8px; top: -1px; }}
+QToolTip {{ background-color: {PANEL}; color: {TEXT}; border: 1px solid {BORDER}; padding: 5px; }}
 """
 
 
@@ -245,6 +274,38 @@ def scan_motors():
     return out
 
 
+def nose_profile_points(shape, diameter, length, y0, n=28):
+    """Outline polygon [[x, y], ...] for a nose cone of the given profile.
+
+    Base sits at y0, tip at y0 + length; x is the radial coordinate (centered on
+    zero). ``shape`` is one of NOSE_SHAPES; unknown values fall back to conical.
+    The outline is closed: right side base->tip, then mirrored left side tip->base.
+    """
+    R = max(diameter / 2.0, 1e-6)
+    L = max(length, 1e-6)
+    shape = str(shape).lower()
+
+    if shape == "conical":
+        # A plain triangle needs no sampling.
+        return [[-R, y0], [R, y0], [0, y0 + L]]
+
+    # Sample the right-hand radius r(u) from the base (u=0) up to the tip (u=L).
+    us = [L * k / (n - 1) for k in range(n)]
+    if shape == "ogive":
+        # Tangent-ogive profile of radius rho, offset so the base radius is R.
+        rho = (R * R + L * L) / (2.0 * R)
+        radii = [max(0.0, (max(rho * rho - u * u, 0.0)) ** 0.5 + R - rho) for u in us]
+    elif shape == "elliptical":
+        radii = [R * (max(0.0, 1.0 - (u / L) ** 2)) ** 0.5 for u in us]
+    else:
+        # Unknown shape: behave like a cone.
+        return [[-R, y0], [R, y0], [0, y0 + L]]
+
+    right = [[radii[k], y0 + us[k]] for k in range(n)]           # base -> tip
+    left = [[-radii[k], y0 + us[k]] for k in range(n - 1, -1, -1)]  # tip -> base
+    return right + left
+
+
 # ---------------------------------------------------------------------------
 # Matplotlib canvas
 # ---------------------------------------------------------------------------
@@ -257,6 +318,104 @@ class MplCanvas(FigureCanvas):
         fig.tight_layout()
         super().__init__(fig)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+
+# ---------------------------------------------------------------------------
+# Box-zoom interaction for the telemetry chart
+# ---------------------------------------------------------------------------
+class BoxZoom:
+    """Rubber-band box-zoom + double-click reset for a matplotlib canvas.
+
+    Left-drag a box to zoom every axes in the figure to the pixel rectangle
+    (per-axes inverse transform, so the twinx right axis zooms correctly).
+    Double-click restores the 'home' view captured by ``set_home()``.
+    """
+
+    MIN_PX = 6          # ignore boxes smaller than this in either dimension
+
+    def __init__(self, canvas):
+        self.canvas = canvas
+        self._press = None          # (axes, x_pixel, y_pixel)
+        self._rect = None           # matplotlib Rectangle rubber band
+        self._home = {}             # {ax: (xlim, ylim)}
+        canvas.mpl_connect("button_press_event", self._on_press)
+        canvas.mpl_connect("motion_notify_event", self._on_motion)
+        canvas.mpl_connect("button_release_event", self._on_release)
+
+    def set_home(self):
+        """Capture the current view of every axes as the double-click reset target."""
+        self._home = {ax: (ax.get_xlim(), ax.get_ylim())
+                      for ax in self.canvas.figure.axes}
+
+    def _remove_rect(self):
+        if self._rect is not None:
+            try:
+                self._rect.remove()
+            except Exception:
+                # A figure clear can orphan the rectangle; ignore.
+                pass
+            self._rect = None
+
+    def _on_press(self, event):
+        if event.button != 1 or event.inaxes is None:
+            return
+        # Double-click anywhere resets to the stored home view.
+        if event.dblclick:
+            self._reset()
+            return
+        self._press = (event.inaxes, event.x, event.y)
+
+    def _on_motion(self, event):
+        if self._press is None:
+            return
+        axes, x0, y0 = self._press
+        if event.x is None or event.y is None:
+            return
+        # Rubber band lives in the pressed axes' data coords.
+        from matplotlib.patches import Rectangle
+        inv = axes.transData.inverted()
+        dx0, dy0 = inv.transform((x0, y0))
+        dx1, dy1 = inv.transform((event.x, event.y))
+        x, y = min(dx0, dx1), min(dy0, dy1)
+        w, h = abs(dx1 - dx0), abs(dy1 - dy0)
+        if self._rect is None:
+            self._rect = Rectangle((x, y), w, h, fill=True, facecolor=BLUE,
+                                   alpha=0.15, edgecolor=BLUE, ls="--", lw=1.2,
+                                   zorder=50)
+            axes.add_patch(self._rect)
+        else:
+            self._rect.set_bounds(x, y, w, h)
+        self.canvas.draw_idle()
+
+    def _on_release(self, event):
+        press = self._press
+        self._press = None
+        self._remove_rect()
+        if press is None or event.x is None or event.y is None:
+            self.canvas.draw_idle()
+            return
+        _, x0, y0 = press
+        # Too small -> treat as a click, do nothing.
+        if abs(event.x - x0) < self.MIN_PX or abs(event.y - y0) < self.MIN_PX:
+            self.canvas.draw_idle()
+            return
+        # Zoom EVERY axes to the same pixel box, inverse-transformed per axes.
+        for ax in self.canvas.figure.axes:
+            inv = ax.transData.inverted()
+            (ax0, ay0) = inv.transform((x0, y0))
+            (ax1, ay1) = inv.transform((event.x, event.y))
+            ax.set_xlim(min(ax0, ax1), max(ax0, ax1))
+            ax.set_ylim(min(ay0, ay1), max(ay0, ay1))
+        self.canvas.draw_idle()
+
+    def _reset(self):
+        self._remove_rect()
+        # update_graph() recreates axes via fig.clear(); only restore live ones.
+        for ax, (xlim, ylim) in self._home.items():
+            if ax in self.canvas.figure.axes:
+                ax.set_xlim(xlim)
+                ax.set_ylim(ylim)
+        self.canvas.draw_idle()
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +1080,37 @@ class FinShapeEditor(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Nudge-able numeric line edit
+# ---------------------------------------------------------------------------
+class NudgeLineEdit(QLineEdit):
+    """A QLineEdit whose value can be nudged with the Up/Down arrow keys.
+
+    Step is 0.001 by default, 0.01 with Shift (coarse) and 0.0001 with Ctrl
+    (fine). Non-numeric text or any other key falls through to the base class.
+    """
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            try:
+                v = float(self.text())
+            except (ValueError, TypeError):
+                super().keyPressEvent(event)
+                return
+            mods = event.modifiers()
+            if mods & Qt.KeyboardModifier.ShiftModifier:
+                step = 0.01
+            elif mods & Qt.KeyboardModifier.ControlModifier:
+                step = 0.0001
+            else:
+                step = 0.001
+            if event.key() == Qt.Key.Key_Down:
+                step = -step
+            self.setText(f"{round(v + step, 6):g}")
+            return
+        super().keyPressEvent(event)
+
+
+# ---------------------------------------------------------------------------
 # Part edit dialog
 # ---------------------------------------------------------------------------
 class PartEditDialog(QDialog):
@@ -936,6 +1126,15 @@ class PartEditDialog(QDialog):
         self.part_data = part_data     # same dict object the parent holds
         self._mc = parent if hasattr(parent, "update_schematic") else None
 
+        # For live preview: a pristine copy to revert to on Cancel, plus a short
+        # debounce timer so we don't redraw on every keystroke.
+        self._orig_data = copy.deepcopy(part_data)
+        self._live_applied = False
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(250)
+        self._live_timer.timeout.connect(self._try_live_apply)
+
         is_fins = part_data.get("type") == "fins"
         # Read-only, user-can't-typo fields (set via BROWSE MOTORS).
         readonly_keys = {"motor_file", "motor_id"}
@@ -948,10 +1147,29 @@ class PartEditDialog(QDialog):
             if is_fins and key == "points":
                 self.fin_editor = FinShapeEditor(str(value), self)
                 self.inputs[key] = self.fin_editor.points_field
+                # Fin-canvas drags edit points_field, which then live-updates the
+                # main schematic through the same debounce as the plain fields.
+                self.fin_editor.points_field.textChanged.connect(self._schedule_live)
                 self.layout.addRow(self.fin_editor)
                 continue
 
-            field = QLineEdit(str(value))
+            # Nose shape is a fixed choice, not free text: use a combo box.
+            if key == "shape":
+                combo = QComboBox()
+                combo.addItems(NOSE_SHAPES)
+                if str(value) in NOSE_SHAPES:
+                    combo.setCurrentText(str(value))
+                _, tip = PART_KEY_HELP.get(key, ("Nose shape", ""))
+                if tip:
+                    combo.setToolTip(tip)
+                self.inputs[key] = combo
+                self.layout.addRow("Nose shape:", combo)
+                combo.currentTextChanged.connect(self._schedule_live)
+                continue
+
+            field = NudgeLineEdit(str(value)) \
+                if (isinstance(value, (int, float)) and not isinstance(value, bool)) \
+                else QLineEdit(str(value))
             label, tip = PART_KEY_HELP.get(
                 key, (key.replace('_', ' ').capitalize(), ""))
             if tip:
@@ -964,17 +1182,27 @@ class PartEditDialog(QDialog):
                 validator.setLocale(QLocale(QLocale.Language.C))
                 validator.setNotation(QDoubleValidator.Notation.StandardNotation)
                 field.setValidator(validator)
+                field.setToolTip((field.toolTip() + " ↑/↓ nudge "
+                                  "(Shift = coarse, Ctrl = fine).").strip())
             if key in readonly_keys:
                 field.setReadOnly(True)
                 field.setStyleSheet(f"color: {FAINT};")
                 field.setToolTip("Set via BROWSE MOTORS - not directly editable.")
             self.inputs[key] = field
+            field.textChanged.connect(self._schedule_live)
             self.layout.addRow(f"{label}:", field)
 
         if part_data.get("type") == "motor":
             self.motor_btn = QPushButton("BROWSE MOTORS")
             self.motor_btn.clicked.connect(self.open_motor_browser)
             self.layout.addRow("Selection", self.motor_btn)
+
+        # Live preview: apply edits to the rocket as you type (revert on Cancel).
+        self.live_cb = QCheckBox("Live preview")
+        self.live_cb.setChecked(True)
+        self.live_cb.setEnabled(self._mc is not None)
+        self.live_cb.setToolTip("Apply changes to the rocket as you type.")
+        self.layout.addRow("", self.live_cb)
 
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                         QDialogButtonBox.StandardButton.Cancel)
@@ -1029,6 +1257,8 @@ class PartEditDialog(QDialog):
 
     def request_delete(self):
         self.delete_requested = True
+        # A pending live-preview apply must not fire on the soon-deleted part.
+        self._live_timer.stop()
         # Deletion should not be blocked by an unrelated invalid field.
         QDialog.accept(self)
 
@@ -1047,10 +1277,35 @@ class PartEditDialog(QDialog):
         return ok
 
     def accept(self):
+        self._live_timer.stop()
         # Keep the dialog open if a numeric field doesn't parse.
         if not self._validate_numeric():
             return
         super().accept()
+
+    def reject(self):
+        self._live_timer.stop()
+        # Undo any live-applied edits by restoring the pristine copy.
+        if self._live_applied and self._mc is not None:
+            self.part_data.clear()
+            self.part_data.update(copy.deepcopy(self._orig_data))
+            self._mc.update_schematic()
+            if hasattr(self._mc, "refresh_sidebar"):
+                self._mc.refresh_sidebar()
+            if hasattr(self._mc, "set_status"):
+                self._mc.set_status(
+                    f"Reverted changes to {self._orig_data.get('name', 'part')}.",
+                    AMBER)
+        super().reject()
+
+    def _schedule_live(self):
+        """Debounced trigger: queue a live apply if live preview is on."""
+        if self._mc is not None and self.live_cb.isChecked():
+            self._live_timer.start()
+
+    def _try_live_apply(self):
+        # apply_changes() already validates + redraws; a bad field just no-ops.
+        self.apply_changes()
 
     def apply_changes(self):
         """Push current (valid) values into the live part and redraw the parent."""
@@ -1059,6 +1314,7 @@ class PartEditDialog(QDialog):
         if not self._validate_numeric():
             return
         self.part_data.update(self.get_values())
+        self._live_applied = True
         self._mc.update_schematic()
         if hasattr(self._mc, "refresh_sidebar"):
             self._mc.refresh_sidebar()
@@ -1069,6 +1325,10 @@ class PartEditDialog(QDialog):
     def get_values(self):
         results = {}
         for key, widget in self.inputs.items():
+            # Combo boxes (nose shape) carry a fixed string choice.
+            if isinstance(widget, QComboBox):
+                results[key] = widget.currentText()
+                continue
             txt = widget.text()
             try:
                 results[key] = float(txt)
@@ -1088,6 +1348,11 @@ class MissionControl(QWidget):
         self.setStyleSheet(MODERN_STYLE)
 
         self.rocket_components = []
+        # Blender-style move-tool state for the builder schematic.
+        self.selected_part_idx = None   # index of the highlighted part, or None
+        self._drag = None               # in-flight drag dict, or None
+        self._schem_view = None         # ((x0,x1),(y0,y1)) sticky zoom, or None
+        self._motor_cache = {}          # motor filename -> parsed dict (or None)
         self.proc = None  # QProcess for the simulation
 
         self.layout = QVBoxLayout(self)
@@ -1132,7 +1397,7 @@ class MissionControl(QWidget):
         self.templates = {
             # External / aerodynamic
             "body": {"type": "body", "name": "Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04, "y_offset": 0.0},
-            "nose": {"type": "nose", "name": "Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04, "y_offset": 0.3},
+            "nose": {"type": "nose", "name": "Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04, "shape": "ogive", "y_offset": 0.3},
             "transition": {"type": "transition", "name": "Transition", "mass": 0.03, "length": 0.05, "fore_diameter": 0.04, "aft_diameter": 0.06, "y_offset": 0.3},
             "boattail": {"type": "boattail", "name": "Boat Tail", "mass": 0.02, "length": 0.04, "fore_diameter": 0.04, "aft_diameter": 0.025, "y_offset": 0.0},
             "fins": {"type": "fins", "name": "Fins", "mass": 0.05, "points": "(0,0), (0.1,0), (0.07,0.08), (0,0.08)", "y_offset": 0.0},
@@ -1238,6 +1503,14 @@ class MissionControl(QWidget):
         self.part_scroll.setWidget(self.part_container)
         self.control_layout.addWidget(self.part_scroll)
 
+        self.autostack_btn = QPushButton("AUTO-STACK AIRFRAME")
+        self.autostack_btn.setObjectName("GhostBtn")
+        self.autostack_btn.setToolTip(
+            "Stack boattail -> body -> transition -> nose from the tail so you "
+            "never hand-calculate y-offsets. Motor and fins are seated at the tail.")
+        self.autostack_btn.clicked.connect(self.auto_arrange)
+        self.control_layout.addWidget(self.autostack_btn)
+
         self.sync_btn = QPushButton("SYNC TO FLIGHT CONFIG")
         self.sync_btn.setObjectName("LaunchBtn")
         self.sync_btn.setToolTip("Estimate mass, length, CG and propellant from the parts, "
@@ -1245,43 +1518,90 @@ class MissionControl(QWidget):
         self.sync_btn.clicked.connect(self.sync_builder_to_flight)
         self.control_layout.addWidget(self.sync_btn)
 
-        # --- Center: schematic ---
+        # --- Center: schematic (Blender-style move tool) ---
+        schem_container = QWidget()
+        schem_box = QVBoxLayout(schem_container)
+        schem_box.setContentsMargins(0, 0, 0, 0)
         self.schematic_canvas = MplCanvas(width=5, height=8)
-        # Overlapping parts (motor inside body) fire one pick_event per artist for
-        # a single click. Buffer them and resolve to the single most specific part.
-        self._pick_buffer = []
-        self.schematic_canvas.mpl_connect('pick_event', self.on_part_clicked)
-        self.schematic_canvas.mpl_connect('motion_notify_event', self.on_schematic_hover)
+        self.schematic_canvas.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.schematic_canvas.mpl_connect('button_press_event', self._schem_press)
+        self.schematic_canvas.mpl_connect('motion_notify_event', self._schem_motion)
+        self.schematic_canvas.mpl_connect('button_release_event', self._schem_release)
+        self.schematic_canvas.mpl_connect('scroll_event', self._schem_scroll)
+        self.schematic_canvas.mpl_connect('key_press_event', self._schem_key)
+        schem_box.addWidget(self.schematic_canvas, 1)
+        schem_hint = QLabel("Click: select · Drag: move · Double-click part: edit · "
+                            "↑/↓: nudge (Shift = 1 mm) · Scroll: zoom · "
+                            "Double-click empty: fit view")
+        schem_hint.setStyleSheet(f"color: {FAINT}; font-size: 10px;")
+        schem_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        schem_box.addWidget(schem_hint)
 
-        # --- Right: stability + totals ---
-        self.stability_panel = QGroupBox("STABILITY ANALYSIS")
-        self.stability_panel.setFixedWidth(260)
-        stab_layout = QVBoxLayout(self.stability_panel)
+        # --- Right: rocket analysis ---
+        self.stability_panel = QGroupBox("ROCKET ANALYSIS")
+        self.stability_panel.setFixedWidth(300)
+        panel_outer = QVBoxLayout(self.stability_panel)
+
+        an_scroll = QScrollArea()
+        an_scroll.setWidgetResizable(True)
+        an_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        an_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        an_inner = QWidget()
+        an_layout = QVBoxLayout(an_inner)
+        an_layout.setSpacing(3)
 
         cap = QLabel("STATIC MARGIN")
         cap.setStyleSheet(f"color: {FAINT}; font-size: 10px; font-weight: bold;")
-        stab_layout.addWidget(cap)
+        an_layout.addWidget(cap)
 
-        self.margin_label = QLabel("0.00 CAL")
+        self.margin_label = QLabel("-- CAL")
         self.margin_label.setStyleSheet(f"font-size: 30px; font-weight: 900; color: {BLUE};")
-        stab_layout.addWidget(self.margin_label)
+        an_layout.addWidget(self.margin_label)
 
         self.margin_status = QLabel("Add parts or set CP/CG.")
         self.margin_status.setWordWrap(True)
         self.margin_status.setStyleSheet(f"color: {MUTED};")
-        stab_layout.addWidget(self.margin_status)
+        an_layout.addWidget(self.margin_status)
 
-        stab_layout.addSpacing(14)
+        self.margin_source = QLabel("")
+        self.margin_source.setWordWrap(True)
+        self.margin_source.setStyleSheet(f"color: {FAINT}; font-size: 10px; font-style: italic;")
+        an_layout.addWidget(self.margin_source)
+
         div = QFrame()
         div.setFrameShape(QFrame.Shape.HLine)
         div.setStyleSheet(f"color: {BORDER};")
-        stab_layout.addWidget(div)
+        an_layout.addWidget(div)
 
-        self.total_mass_label = QLabel("Total mass: 0.000 kg")
-        self.total_len_label = QLabel("Total length: 0.000 m")
-        for l in (self.total_mass_label, self.total_len_label):
-            l.setStyleSheet(f"color: {TEXT}; margin-top: 6px;")
-            stab_layout.addWidget(l)
+        # Analysis rows, grouped into sections. an_values maps a key -> value label.
+        self.an_values = {}
+        self._an_section(an_layout, "MASS & GEOMETRY")
+        self._an_row(an_layout, "liftoff", "Liftoff mass")
+        self._an_row(an_layout, "dry", "Dry mass")
+        self._an_row(an_layout, "length", "Length")
+        self._an_row(an_layout, "diameter", "Body diameter")
+        self._an_row(an_layout, "fineness", "Fineness (L/D)")
+        self._an_row(an_layout, "fin_area", "Fin area (one fin)")
+
+        self._an_section(an_layout, "BALANCE")
+        self._an_row(an_layout, "cg", "CG from nose tip")
+        self._an_row(an_layout, "cp", "CP from nose tip")
+
+        self._an_section(an_layout, "PROPULSION")
+        self._an_row(an_layout, "motor", "Motor")
+        self._an_row(an_layout, "impulse", "Total impulse")
+        self._an_row(an_layout, "thrust", "Avg thrust")
+        self._an_row(an_layout, "twr", "Thrust / weight")
+
+        self._an_section(an_layout, "RECOVERY")
+        self._an_row(an_layout, "chute", "Chute diameter")
+        self._an_row(an_layout, "descent", "Est. descent rate")
+
+        self._an_section(an_layout, "DESIGN CHECKS")
+        self.an_warnings = QLabel("Add parts to see design checks.")
+        self.an_warnings.setWordWrap(True)
+        self.an_warnings.setStyleSheet(f"color: {FAINT}; font-size: 11px;")
+        an_layout.addWidget(self.an_warnings)
 
         legend = QLabel(
             f"<span style='color:{RED};'>&#9632;</span> &lt;1 cal unstable&nbsp; "
@@ -1291,11 +1611,14 @@ class MissionControl(QWidget):
         )
         legend.setWordWrap(True)
         legend.setStyleSheet("font-size: 10px; margin-top: 10px;")
-        stab_layout.addWidget(legend)
-        stab_layout.addStretch()
+        an_layout.addWidget(legend)
+        an_layout.addStretch()
+
+        an_scroll.setWidget(an_inner)
+        panel_outer.addWidget(an_scroll)
 
         layout.addWidget(self.controls)
-        layout.addWidget(self.schematic_canvas, 1)
+        layout.addWidget(schem_container, 1)
         layout.addWidget(self.stability_panel)
 
     def add_component(self, part_type):
@@ -1326,8 +1649,13 @@ class MissionControl(QWidget):
                 f"QFrame:hover {{ border: 1px solid {BLUE}; }}"
             )
             card_layout = QHBoxLayout(card)
-            name_label = QLabel(f"<b>{part.get('name', '?')}</b>"
-                                f"<br><small>{part.get('type', '').upper()}</small>")
+            try:
+                y_txt = f"{float(part.get('y_offset', 0)):.3f}"
+            except (ValueError, TypeError):
+                y_txt = "?"
+            name_label = QLabel(
+                f"<b>{part.get('name', '?')}</b>"
+                f"<br><small>{part.get('type', '').upper()} · y {y_txt} m</small>")
             name_label.setStyleSheet(f"border: none; color: {TEXT};")
             card_layout.addWidget(name_label)
             card_layout.addStretch()
@@ -1339,34 +1667,6 @@ class MissionControl(QWidget):
             card_layout.addWidget(edit_btn)
             self.part_list_layout.addWidget(card)
 
-    def on_part_clicked(self, event):
-        # One click over overlapping parts fires a pick_event per artist. Matplotlib
-        # delivers them all synchronously before returning to the Qt loop, so buffer
-        # them here and resolve once via a zero-delay timer (fires when the loop is
-        # idle again, i.e. after every pick for this click has arrived).
-        artist = getattr(event, 'artist', None)
-        if not hasattr(artist, 'part_index'):
-            return
-        schedule = not self._pick_buffer
-        self._pick_buffer.append(artist)
-        if schedule:
-            QTimer.singleShot(0, self._resolve_pick_buffer)
-
-    def _resolve_pick_buffer(self):
-        # Choose the most specific part under the cursor: the smallest patch area
-        # (motor inside a body tube, fins vs. body, etc.), then open exactly one
-        # dialog through the single edit path.
-        artists = self._pick_buffer
-        self._pick_buffer = []
-        if not artists:
-            return
-        best = min(artists, key=self._artist_area)
-        try:
-            idx = int(best.part_index)
-        except (AttributeError, ValueError, TypeError):
-            return
-        self.open_edit_dialog_by_index(idx)
-
     @staticmethod
     def _artist_area(artist):
         # Approximate area of a patch from its data-space bounding box; smaller
@@ -1377,18 +1677,175 @@ class MissionControl(QWidget):
         except Exception:
             return float('inf')
 
-    def on_schematic_hover(self, event):
-        # Subtle affordance: pointing-hand cursor over a clickable part, arrow
-        # otherwise. No redraws - just a cheap contains() test per patch.
-        over_part = False
-        if event.inaxes is self.schematic_canvas.axes:
-            for patch in self.schematic_canvas.axes.patches:
-                if hasattr(patch, 'part_index') and patch.contains(event)[0]:
-                    over_part = True
-                    break
-        shape = Qt.CursorShape.PointingHandCursor if over_part else Qt.CursorShape.ArrowCursor
+    # ------------------------------------------------------------------
+    # Builder schematic: Blender-style move tool
+    # ------------------------------------------------------------------
+    def _part_at(self, event):
+        """Index of the smallest-area part patch under the event, or None."""
+        best_idx, best_area = None, float('inf')
+        for patch in self.schematic_canvas.axes.patches:
+            if not hasattr(patch, 'part_index'):
+                continue
+            try:
+                hit = patch.contains(event)[0]
+            except Exception:
+                hit = False
+            if hit:
+                area = self._artist_area(patch)
+                if area < best_area:
+                    best_area, best_idx = area, int(patch.part_index)
+        return best_idx
+
+    def _schem_press(self, event):
+        if event.inaxes is not self.schematic_canvas.axes or event.button != 1:
+            return
+        self.schematic_canvas.setFocus()
+        idx = self._part_at(event)
+
+        # Double-click: edit a part, or fit the view when the empty area is hit.
+        if event.dblclick:
+            self._drag = None
+            if idx is not None:
+                self.open_edit_dialog_by_index(idx)
+            else:
+                self._schem_view = None
+                self.update_schematic()
+            return
+
+        # Clicking empty space deselects.
+        if idx is None:
+            if self.selected_part_idx is not None:
+                self.selected_part_idx = None
+                self.update_schematic()
+            return
+
+        # Select + arm a drag from the current cursor position.
+        self.selected_part_idx = idx
+        part = self.rocket_components[idx]
+        try:
+            orig = float(part.get("y_offset", 0.0))
+        except (ValueError, TypeError):
+            orig = 0.0
+        self._drag = {"idx": idx, "ydata": event.ydata, "ypix": event.y,
+                      "orig": orig, "moved": False}
+        self.update_schematic()
+        self.set_status(
+            f"Selected {part.get('name', 'part')} — drag to move, double-click "
+            f"to edit, ↑/↓ to nudge.", BLUE)
+
+    def _schem_motion(self, event):
+        if self._drag is not None:
+            if event.inaxes is not self.schematic_canvas.axes or event.ydata is None:
+                return
+            # Disambiguate a click from a drag: require a small pixel move first.
+            if not self._drag["moved"] and abs(event.y - self._drag["ypix"]) < 4:
+                return
+            if not self._drag["moved"]:
+                self._drag["moved"] = True
+                self.schematic_canvas.setCursor(
+                    QCursor(Qt.CursorShape.ClosedHandCursor))
+            idx = self._drag["idx"]
+            part = self.rocket_components[idx]
+            new = self._drag["orig"] + (event.ydata - self._drag["ydata"])
+            new = self._snap_offset(new, idx)
+            new = round(max(0.0, new), 4)
+            part["y_offset"] = new
+            self.update_schematic()
+            self.set_status(f"{part.get('name', 'part')}: {new:.3f} m from tail", BLUE)
+            return
+        # No drag: hover affordance (open/closed hand vs. arrow).
+        over = event.inaxes is self.schematic_canvas.axes and \
+            self._part_at(event) is not None
+        shape = Qt.CursorShape.OpenHandCursor if over else Qt.CursorShape.ArrowCursor
         if self.schematic_canvas.cursor().shape() != shape:
             self.schematic_canvas.setCursor(QCursor(shape))
+
+    def _snap_offset(self, y, moving_idx):
+        """Magnetic snap to airframe junctions, else fall back to a 5 mm grid."""
+        # Junction targets: the tail plus each other airframe part's ends.
+        targets = [0.0]
+        for j, p in enumerate(self.rocket_components):
+            if j == moving_idx or p.get("type") not in AIRFRAME_TYPES:
+                continue
+            try:
+                y0 = float(p.get("y_offset", 0.0))
+            except (ValueError, TypeError):
+                continue
+            targets.append(y0)
+            targets.append(y0 + self._part_length(p))
+
+        plen = self._part_length(self.rocket_components[moving_idx])
+        total_length = self.builder_totals()[2]
+        threshold = max(0.004, 0.012 * max(total_length, 0.1))
+
+        best, best_d = None, threshold
+        for t in targets:
+            # bottom lands on the junction, or top lands on the junction.
+            for cand in (t, t - plen):
+                d = abs(y - cand)
+                if d <= best_d:
+                    best_d, best = d, cand
+        if best is not None:
+            return best
+        # No junction nearby: snap to the 5 mm grid.
+        return round(y / 0.005) * 0.005
+
+    def _schem_release(self, event):
+        drag = self._drag
+        self._drag = None
+        if drag is not None and drag.get("moved"):
+            part = self.rocket_components[drag["idx"]]
+            try:
+                y = float(part.get("y_offset", 0.0))
+            except (ValueError, TypeError):
+                y = 0.0
+            self.refresh_sidebar()
+            self.set_status(
+                f"Moved {part.get('name', 'part')} to {y:.3f} m from tail.", GREEN)
+        self.schematic_canvas.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+
+    def _schem_scroll(self, event):
+        if event.inaxes is not self.schematic_canvas.axes or event.xdata is None:
+            return
+        ax = self.schematic_canvas.axes
+        factor = (1 / 1.2) if event.step > 0 else 1.2
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        cx, cy = event.xdata, event.ydata
+        nx0 = cx + (x0 - cx) * factor
+        nx1 = cx + (x1 - cx) * factor
+        ny0 = cy + (y0 - cy) * factor
+        ny1 = cy + (y1 - cy) * factor
+        self._schem_view = ((nx0, nx1), (ny0, ny1))
+        ax.set_xlim(nx0, nx1)
+        ax.set_ylim(ny0, ny1)
+        self.schematic_canvas.draw_idle()
+
+    def _schem_key(self, event):
+        if event.key is None:
+            return
+        if event.key == "escape":
+            if self.selected_part_idx is not None:
+                self.selected_part_idx = None
+                self.update_schematic()
+            return
+        idx = self.selected_part_idx
+        if idx is None or not (0 <= idx < len(self.rocket_components)):
+            return
+        steps = {"up": 0.005, "down": -0.005,
+                 "shift+up": 0.001, "shift+down": -0.001}
+        if event.key not in steps:
+            return
+        part = self.rocket_components[idx]
+        try:
+            y0 = float(part.get("y_offset", 0.0))
+        except (ValueError, TypeError):
+            y0 = 0.0
+        y0 = round(max(0.0, y0 + steps[event.key]), 4)
+        part["y_offset"] = y0
+        self.update_schematic()
+        self.refresh_sidebar()
+        self.set_status(f"{part.get('name', 'part')}: {y0:.3f} m from tail", BLUE)
 
     def open_edit_dialog_by_index(self, idx):
         if not (0 <= idx < len(self.rocket_components)):
@@ -1443,6 +1900,13 @@ class MissionControl(QWidget):
 
     def update_schematic(self):
         ax = self.schematic_canvas.axes
+
+        # Preserve the view: a sticky scroll-zoom always wins; otherwise hold the
+        # current limits steady while a drag is in progress so it doesn't jitter.
+        keep_view = self._schem_view
+        if keep_view is None and self._drag is not None and self._drag.get("moved"):
+            keep_view = (ax.get_xlim(), ax.get_ylim())
+
         ax.clear()
         ax.set_facecolor(BG)
         ax.axis('off')
@@ -1452,13 +1916,20 @@ class MissionControl(QWidget):
                     ha='center', va='center')
             ax.set_xlim(-0.5, 0.5)
             ax.set_ylim(-0.5, 0.5)
-            self.schematic_canvas.draw()
+            self.schematic_canvas.draw_idle()
             self.update_totals()
             return
 
         from matplotlib.patches import Rectangle, Polygon
         max_height = 0.0
         r_body = self._body_radius()
+
+        def _highlight(patch, idx):
+            # Amber outline on the selected part (fins call this per polygon too).
+            if idx == self.selected_part_idx:
+                patch.set_edgecolor(AMBER)
+                patch.set_linewidth(2.4)
+                patch.set_zorder(6)
 
         for i, part in enumerate(self.rocket_components):
             ptype = part.get("type")
@@ -1471,15 +1942,16 @@ class MissionControl(QWidget):
             max_height = max(max_height, y0 + h)
 
             # zorder stacks the body lowest (1), then external/internal parts (2),
-            # motor on top (3) so the innermost part is drawn - and clicked - on
-            # top of whatever contains it. The smallest-area pick then wins.
+            # motor on top (3) so the innermost part is drawn on top of whatever
+            # contains it. Hit-testing uses contains() (smallest-area wins).
             shape = None
             if ptype == "body":
                 shape = Rectangle((-w / 2, y0), w, h, color=CARD, ec=BLUE, lw=2,
-                                  picker=True, zorder=1)
+                                  zorder=1)
             elif ptype == "nose":
-                shape = Polygon([[-w / 2, y0], [w / 2, y0], [0, y0 + h]],
-                                color=BLUE, ec='white', lw=1, picker=True, zorder=2)
+                shape = Polygon(nose_profile_points(part.get("shape", "conical"),
+                                                    w, h, y0),
+                                facecolor=BLUE, ec='white', lw=1, zorder=2)
             elif ptype in ("transition", "boattail"):
                 try:
                     df = float(part.get("fore_diameter", w))
@@ -1489,16 +1961,16 @@ class MissionControl(QWidget):
                 # y grows toward the nose, so 'fore' is the top edge, 'aft' the bottom.
                 shape = Polygon([[-da / 2, y0], [da / 2, y0],
                                  [df / 2, y0 + h], [-df / 2, y0 + h]],
-                                color=CARD, ec=BLUE, lw=2, picker=True, zorder=2)
+                                color=CARD, ec=BLUE, lw=2, zorder=2)
             elif ptype == "launch_lug":
                 # Small tube against the right-hand body wall.
                 shape = Rectangle((r_body, y0), max(w, 0.003), h,
-                                  color="#52525b", ec=MUTED, lw=1, picker=True, zorder=2)
+                                  color="#52525b", ec=MUTED, lw=1, zorder=2)
             elif ptype == "rail_button":
                 # Tiny square standoff on the body wall (uses 'height').
                 s = h if h > 0 else 0.008
                 shape = Rectangle((r_body, y0), s, s,
-                                  color=MUTED, ec=TEXT, lw=0.5, picker=True, zorder=2)
+                                  color=MUTED, ec=TEXT, lw=0.5, zorder=2)
             elif ptype == "fins":
                 try:
                     raw = parse_fin_points(part["points"])
@@ -1508,8 +1980,9 @@ class MissionControl(QWidget):
                 right = [[p[0] + r_body, p[1] + y0] for p in raw]
                 left = [[-p[0] - r_body, p[1] + y0] for p in raw]
                 for pts in (right, left):
-                    poly = Polygon(pts, color=BLUE, alpha=0.75, picker=True, zorder=2)
+                    poly = Polygon(pts, color=BLUE, alpha=0.75, zorder=2)
                     poly.part_index = i
+                    _highlight(poly, i)
                     ax.add_patch(poly)
                 max_height = max(max_height, y0 + max(p[1] for p in raw))
                 continue
@@ -1524,23 +1997,59 @@ class MissionControl(QWidget):
                 iw = min(w, 2 * r_body) if r_body > 0 else w
                 ih = h if h > 0 else 0.004
                 shape = Rectangle((-iw / 2, y0), iw, ih, facecolor=col, alpha=0.28,
-                                  ec=col, ls='--', lw=1.2, picker=True, zorder=2)
+                                  ec=col, ls='--', lw=1.2, zorder=2)
             elif ptype == "motor":
                 shape = Rectangle((-w / 2, max(y0, 0.0)), w, h,
-                                  color="#52525b", ec=MUTED, lw=1, picker=True, zorder=3)
+                                  color="#52525b", ec=MUTED, lw=1, zorder=3)
                 ax.text(0, y0 + h / 2, str(part.get("motor_id", "")), color='white',
                         ha='center', va='center', fontsize=7, fontweight='bold', zorder=4)
 
             if shape is not None:
                 shape.part_index = i
+                _highlight(shape, i)
                 ax.add_patch(shape)
 
-        pad = max(max_height * 0.05, 0.05)
-        ax.set_ylim(-pad, max_height + pad)
-        span = max(max_height, 0.2)
-        ax.set_xlim(-span / 2, span / 2)
+        # Dashed centerline down the axis of symmetry.
+        ax.plot([0, 0], [0, max_height], color=BORDER, lw=0.8,
+                ls=(0, (6, 6)), zorder=0)
+
+        # CG / CP markers (builder geometry).
+        dry, prop, length, cg_bottom = self.builder_totals()
+        x_txt = r_body + 0.03 * max(length, 0.3)
+        if dry > 0 and length > 0:
+            ax.plot(0, cg_bottom, marker='o', ms=9, mfc=BG, mec=BLUE, mew=2, zorder=7)
+            ax.plot(0, cg_bottom, marker='+', color=BLUE, ms=9, mew=2, zorder=8)
+            ax.text(x_txt, cg_bottom, "CG", color=BLUE, va='center', ha='left',
+                    fontsize=8, fontweight='bold', zorder=8)
+        cp = self.estimate_cp()
+        if cp is not None:
+            cp_bottom = length - cp
+            ax.plot(0, cp_bottom, marker='o', ms=9, mfc=RED, mec='white', mew=1.2,
+                    zorder=7)
+            ax.text(x_txt, cp_bottom, "CP", color=RED, va='center', ha='left',
+                    fontsize=8, fontweight='bold', zorder=8)
+
+        # Selected-part offset annotation, left of the body.
+        if self.selected_part_idx is not None and \
+                0 <= self.selected_part_idx < len(self.rocket_components):
+            sp = self.rocket_components[self.selected_part_idx]
+            try:
+                sy0 = float(sp.get("y_offset", 0))
+            except (ValueError, TypeError):
+                sy0 = 0.0
+            ax.text(-x_txt, sy0, f"y = {sy0:.3f} m", color=AMBER, ha='right',
+                    va='center', fontsize=8, zorder=8)
+
+        if keep_view is not None:
+            ax.set_xlim(keep_view[0])
+            ax.set_ylim(keep_view[1])
+        else:
+            pad = max(max_height * 0.05, 0.05)
+            ax.set_ylim(-pad, max_height + pad)
+            span = max(max_height, 0.2)
+            ax.set_xlim(-span / 2, span / 2)
         ax.set_aspect('equal')
-        self.schematic_canvas.draw()
+        self.schematic_canvas.draw_idle()
         self.update_totals()
 
     def builder_totals(self):
@@ -1574,9 +2083,114 @@ class MissionControl(QWidget):
         return dry, prop, top, cg
 
     def update_totals(self):
-        dry, prop, length, cg = self.builder_totals()
-        self.total_mass_label.setText(f"Total mass: {dry + prop:.3f} kg")
-        self.total_len_label.setText(f"Total length: {length:.3f} m")
+        # The old mass/length labels folded into the ROCKET ANALYSIS panel.
+        self.update_analysis_panel()
+
+    def auto_arrange(self):
+        """Stack the airframe from the tail so offsets never need hand-tuning.
+
+        Order: boattails, then bodies + transitions in their current bottom-up
+        order, then noses. Each part's lower end is seated on the previous part's
+        top. Motor is seated just off the tail, fins at the tail; internal and
+        recovery gear are left where the user placed them.
+        """
+        if not self.rocket_components:
+            self.set_status("No components to auto-stack. Add parts first.", AMBER)
+            return
+
+        def _cur_y(p):
+            try:
+                return float(p.get("y_offset", 0.0))
+            except (ValueError, TypeError):
+                return 0.0
+
+        boattails = [p for p in self.rocket_components if p.get("type") == "boattail"]
+        middle = sorted(
+            [p for p in self.rocket_components
+             if p.get("type") in ("body", "transition")],
+            key=_cur_y)
+        noses = [p for p in self.rocket_components if p.get("type") == "nose"]
+
+        y = 0.0
+        for p in boattails + middle + noses:
+            p["y_offset"] = round(y, 4)
+            y += self._part_length(p)
+
+        # Motor seated just off the tail; fins at the tail.
+        for p in self.rocket_components:
+            if p.get("type") == "motor":
+                p["y_offset"] = 0.005
+            elif p.get("type") == "fins":
+                p["y_offset"] = 0.0
+
+        self._schem_view = None
+        self.update_schematic()
+        self.refresh_sidebar()
+        self.set_status(
+            "Airframe auto-stacked from the tail; motor and fins seated at the tail.",
+            GREEN)
+
+    # ------------------------------------------------------------------
+    # ROCKET ANALYSIS panel
+    # ------------------------------------------------------------------
+    def _an_section(self, layout, title):
+        """Add a small section heading to the analysis panel."""
+        lbl = QLabel(title)
+        lbl.setStyleSheet(f"color: {BLUE}; font-size: 10px; font-weight: 800; "
+                          f"letter-spacing: 1px; margin-top: 12px;")
+        layout.addWidget(lbl)
+
+    def _an_row(self, layout, key, text):
+        """Add a name/value row; the value label is stored in an_values[key]."""
+        row = QHBoxLayout()
+        name = QLabel(text)
+        name.setStyleSheet(f"color: {MUTED}; font-size: 11px;")
+        value = QLabel("—")
+        value.setStyleSheet(f"color: {TEXT}; font-size: 12px; font-weight: 700;")
+        value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(name)
+        row.addStretch()
+        row.addWidget(value)
+        self.an_values[key] = value
+        layout.addLayout(row)
+
+    def _set_an(self, key, text, color=None):
+        """Set the text (and colour) of an analysis value row."""
+        w = self.an_values.get(key)
+        if w is None:
+            return
+        w.setText(text)
+        w.setStyleSheet(
+            f"color: {color or TEXT}; font-size: 12px; font-weight: 700;")
+
+    def _motor_info(self, filename):
+        """Parsed motor dict for a motors/ filename (cached), or None."""
+        if not filename:
+            return None
+        filename = str(filename)
+        if filename in self._motor_cache:
+            return self._motor_cache[filename]
+        info = None
+        path = os.path.join(MOTORS_DIR, filename)
+        if os.path.exists(path):
+            try:
+                info = parse_motor_file(path)
+            except Exception:
+                info = None
+        self._motor_cache[filename] = info
+        return info
+
+    @staticmethod
+    def _impulse_class(impulse):
+        """NAR impulse-class letter for a total impulse in N·s ('' if <= 0)."""
+        if impulse <= 0:
+            return ""
+        ceiling = 2.5
+        for letter in "ABCDEFGHIJKLMNO":
+            if impulse <= ceiling:
+                return letter
+            ceiling *= 2.0
+        return "O+"
 
     def estimate_cp(self):
         """Simplified Barrowman estimate of the CP distance from the NOSE TIP.
@@ -1602,9 +2216,13 @@ class MissionControl(QWidget):
         # Accumulate (CNa, CP-from-nose) terms and take the normal-force-weighted
         # mean. With no transitions/boattails this reduces exactly to the previous
         # nose(+fins) result.
-        # Nose cone: CNa = 2, CP at ~2/3 of the nose length from the tip (conical)
+        # Nose cone: CNa = 2, CP a shape-dependent fraction of the nose length
+        # from the tip (Barrowman coefficients per profile).
         cn_nose = 2.0
-        x_nose = (2.0 / 3.0) * nose_len
+        nose_coeff = {"conical": 2.0 / 3.0, "ogive": 0.466,
+                      "elliptical": 1.0 / 3.0}
+        k_nose = nose_coeff.get(str(nose.get("shape", "conical")).lower(), 2.0 / 3.0)
+        x_nose = k_nose * nose_len
         terms = [(cn_nose, x_nose)]
 
         # Fin set (unchanged geometry; skipped rather than early-returning so
@@ -1861,6 +2479,12 @@ class MissionControl(QWidget):
 
         self.canvas = MplCanvas()
         center_layout.addWidget(self.canvas, 1)
+        self.flight_zoom = BoxZoom(self.canvas)
+        zoom_hint = QLabel("Drag a box on the chart to zoom in · "
+                           "double-click the chart to reset")
+        zoom_hint.setStyleSheet(f"color: {FAINT}; font-size: 10px;")
+        zoom_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        center_layout.addWidget(zoom_hint)
 
         # --- Right: report ---
         self.report_scroll = QScrollArea()
@@ -1959,6 +2583,17 @@ class MissionControl(QWidget):
     # ------------------------------------------------------------------
     # Stability gauge
     # ------------------------------------------------------------------
+    @staticmethod
+    def _classify_margin(margin):
+        """Return (status_text, color) for a static margin in calibers."""
+        if margin < 1.0:
+            return "UNSTABLE - CG too far aft (<1 cal).", RED
+        elif margin <= 2.0:
+            return "OPTIMAL stability (1-2 cal).", GREEN
+        elif margin <= 3.0:
+            return "ACCEPTABLE - slightly overstable (2-3 cal).", AMBER
+        return "OVERSTABLE - heavy weathercocking (>3 cal).", RED
+
     def calculate_stability(self):
         """Return (margin_cal, status_text, color) from the flight CP/CG/Diameter."""
         try:
@@ -1970,24 +2605,172 @@ class MissionControl(QWidget):
         if dia <= 0:
             return None, "Diameter must be > 0.", RED
         margin = (cp - cg) / dia
-        if margin < 1.0:
-            return margin, "UNSTABLE - CG too far aft (<1 cal).", RED
-        elif margin <= 2.0:
-            return margin, "OPTIMAL stability (1-2 cal).", GREEN
-        elif margin <= 3.0:
-            return margin, "ACCEPTABLE - slightly overstable (2-3 cal).", AMBER
-        return margin, "OVERSTABLE - heavy weathercocking (>3 cal).", RED
+        status, color = self._classify_margin(margin)
+        return margin, status, color
 
     def update_stability_gauge(self):
-        margin, status, color = self.calculate_stability()
+        # Flight-field signals and startup both route through the single renderer.
+        self.update_analysis_panel()
+
+    def update_analysis_panel(self):
+        """Single renderer for the ROCKET ANALYSIS panel (margin + all rows)."""
+        components = self.rocket_components
+        has = bool(components)
+        dry, prop, length, cg_bottom = self.builder_totals()
+        dia = 2 * self._body_radius() if has else 0.0
+        cp_nose = self.estimate_cp() if has else None
+        cg_nose = (length - cg_bottom) if (has and length > 0 and dry > 0) else None
+
+        # --- Static margin: prefer live builder geometry, else the flight config.
+        margin = None
+        if cp_nose is not None and cg_nose is not None and dia and dia > 0:
+            margin = (cp_nose - cg_nose) / dia
+            source = "Computed from builder geometry."
+        else:
+            margin, _status, _color = self.calculate_stability()
+            source = ("From flight-config CP/CG — add a nose and fins for a live "
+                      "builder estimate.")
+            # Back-fill display values from the flight fields where parseable.
+            def _pf(key):
+                try:
+                    return float(self.inputs[key].text())
+                except (ValueError, KeyError):
+                    return None
+            if cp_nose is None:
+                cp_nose = _pf("CP Dist (m)")
+            if cg_nose is None:
+                cg_nose = _pf("CG Dist (m)")
+            if not dia:
+                dia = _pf("Diameter (m)") or 0.0
+
         if margin is None:
             self.margin_label.setText("-- CAL")
-            self.margin_label.setStyleSheet(f"font-size: 30px; font-weight: 900; color: {FAINT};")
+            self.margin_label.setStyleSheet(
+                f"font-size: 30px; font-weight: 900; color: {FAINT};")
+            self.margin_status.setText(
+                "Add a nose cone and fins, or set CP/CG in the flight config.")
+            self.margin_status.setStyleSheet(f"color: {MUTED};")
         else:
+            status, color = self._classify_margin(margin)
             self.margin_label.setText(f"{margin:.2f} CAL")
-            self.margin_label.setStyleSheet(f"font-size: 30px; font-weight: 900; color: {color};")
-        self.margin_status.setText(status)
-        self.margin_status.setStyleSheet(f"color: {color};")
+            self.margin_label.setStyleSheet(
+                f"font-size: 30px; font-weight: 900; color: {color};")
+            self.margin_status.setText(status)
+            self.margin_status.setStyleSheet(f"color: {color};")
+        self.margin_source.setText(source)
+
+        dash = "—"
+
+        # --- MASS & GEOMETRY ---
+        self._set_an("liftoff", f"{dry + prop:.3f} kg" if has else dash)
+        self._set_an("dry", f"{dry:.3f} kg" if has else dash)
+        self._set_an("length", f"{length:.3f} m" if (has and length > 0) else dash)
+        self._set_an("diameter", f"{dia * 1000:.0f} mm" if dia else dash)
+        if dia and length > 0:
+            self._set_an("fineness", f"{length / dia:.1f}")
+        else:
+            self._set_an("fineness", dash)
+        fin_area = self._fin_planform_area()
+        self._set_an("fin_area", f"{fin_area * 1e4:.1f} cm²" if fin_area else dash)
+
+        # --- BALANCE ---
+        self._set_an("cg", f"{cg_nose:.3f} m" if cg_nose is not None else dash)
+        self._set_an("cp", f"{cp_nose:.3f} m" if cp_nose is not None else dash)
+
+        # --- PROPULSION ---
+        motor = next((p for p in components if p.get("type") == "motor"), None)
+        info = self._motor_info(motor.get("motor_file")) if motor else None
+        twr = None
+        if info:
+            self._set_an("motor", str(info.get("name", dash)))
+            impulse = float(info.get("impulse", 0.0))
+            cls = self._impulse_class(impulse)
+            self._set_an("impulse", f"{impulse:.0f} N·s ({cls})" if cls
+                         else f"{impulse:.0f} N·s")
+            avg_thrust = float(info.get("avg_thrust", 0.0))
+            self._set_an("thrust", f"{avg_thrust:.0f} N")
+            liftoff = (dry + prop)
+            if avg_thrust > 0 and liftoff > 0:
+                twr = avg_thrust / (liftoff * 9.81)
+                tcol = GREEN if twr >= 5 else (AMBER if twr >= 3 else RED)
+                self._set_an("twr", f"{twr:.1f} : 1", tcol)
+            else:
+                self._set_an("twr", dash)
+        else:
+            for k in ("motor", "impulse", "thrust", "twr"):
+                self._set_an(k, dash)
+
+        # --- RECOVERY ---
+        chute = next((p for p in components if p.get("type") == "parachute"), None)
+        descent = None
+        if chute:
+            try:
+                d = float(chute.get("chute_diameter", 0.0))
+                cd = float(chute.get("chute_cd", 0.0))
+            except (ValueError, TypeError):
+                d, cd = 0.0, 0.0
+            self._set_an("chute", f"{d:.2f} m" if d > 0 else dash)
+            area = np.pi * d * d / 4.0
+            if d > 0 and cd > 0 and dry > 0 and area > 0:
+                descent = float(np.sqrt(2 * dry * 9.81 / (1.225 * cd * area)))
+                dcol = GREEN if descent <= 6 else (AMBER if descent <= 8 else RED)
+                self._set_an("descent", f"{descent:.1f} m/s", dcol)
+            else:
+                self._set_an("descent", dash)
+        else:
+            self._set_an("chute", dash)
+            self._set_an("descent", dash)
+
+        # --- DESIGN CHECKS ---
+        if not has:
+            self.an_warnings.setText("Add parts to see design checks.")
+            self.an_warnings.setStyleSheet(f"color: {FAINT}; font-size: 11px;")
+            return
+
+        types = [p.get("type") for p in components]
+        warnings = []
+        if "nose" not in types:
+            warnings.append("No nose cone — add one for a proper CP estimate.")
+        if "fins" not in types:
+            warnings.append("No fins — the rocket has no restoring force.")
+        if "body" not in types:
+            warnings.append("No body tube — add the main airframe section.")
+        if "motor" not in types:
+            warnings.append("No motor — add one under PROPULSION.")
+        if not ("parachute" in types or "streamer" in types):
+            warnings.append("No recovery device — add a parachute or streamer.")
+
+        # Nose base vs body diameter mismatch.
+        nose = next((p for p in components if p.get("type") == "nose"), None)
+        if nose is not None and dia:
+            try:
+                nose_d = float(nose.get("diameter", 0.0))
+            except (ValueError, TypeError):
+                nose_d = 0.0
+            if nose_d > 0 and abs(nose_d - dia) > 0.002:
+                warnings.append(
+                    f"Nose base {nose_d * 1000:.0f} mm ≠ body "
+                    f"{dia * 1000:.0f} mm — mismatched diameters.")
+
+        if margin is not None and margin < 1:
+            warnings.append("Static margin below 1 cal — move CG forward "
+                            "(ballast in nose) or enlarge fins.")
+        if margin is not None and margin > 3:
+            warnings.append("Static margin above 3 cal — expect strong "
+                            "weathercocking into the wind.")
+        if twr is not None and twr < 5:
+            warnings.append(f"Thrust-to-weight {twr:.1f}:1 — aim for at least "
+                            f"5:1 at liftoff.")
+        if descent is not None and descent > 8:
+            warnings.append("Descent rate above 8 m/s — use a larger parachute "
+                            "for a softer landing.")
+
+        if warnings:
+            self.an_warnings.setText("\n".join("• " + w for w in warnings))
+            self.an_warnings.setStyleSheet(f"color: {AMBER}; font-size: 11px;")
+        else:
+            self.an_warnings.setText("✓ All basic design checks passed.")
+            self.an_warnings.setStyleSheet(f"color: {GREEN}; font-size: 11px;")
 
     # ------------------------------------------------------------------
     # Simulation (non-blocking via QProcess)
@@ -2128,6 +2911,8 @@ class MissionControl(QWidget):
 
         fig.tight_layout()
         self.canvas.draw()
+        # Capture this as the box-zoom "home" view for double-click reset.
+        self.flight_zoom.set_home()
 
         if report:
             self.update_report(report)
