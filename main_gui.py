@@ -1105,7 +1105,7 @@ class NudgeLineEdit(QLineEdit):
                 step = 0.001
             if event.key() == Qt.Key.Key_Down:
                 step = -step
-            self.setText(f"{round(v + step, 6):g}")
+            self.setText(f"{v + step:.6f}".rstrip("0").rstrip(".") or "0")
             return
         super().keyPressEvent(event)
 
