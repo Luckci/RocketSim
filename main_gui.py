@@ -63,6 +63,68 @@ TOOLTIPS = {
     "Chute Delay (s)": "Delay after apogee before the parachute deploys (seconds).",
 }
 
+# Per-part-key help for the PartEditDialog: key -> (nice label with units, tooltip).
+# New parts introduce many geometry keys; this keeps the auto-generated edit
+# dialogs self-explanatory without restructuring the dialog.
+PART_KEY_HELP = {
+    "mass": ("Mass (kg)", "Component mass in kilograms."),
+    "length": ("Length (m)", "Length along the rocket axis (m)."),
+    "diameter": ("Diameter (m)", "Outer diameter (m)."),
+    "y_offset": ("Y offset from tail (m)",
+                 "Axial position of the part's lower end, measured up from the tail (m)."),
+    "fore_diameter": ("Fore diameter (m)", "Diameter at the forward, nose-facing end (m)."),
+    "aft_diameter": ("Aft diameter (m)", "Diameter at the aft, tail-facing end (m)."),
+    "height": ("Height (m)", "Standoff height from the body wall (m)."),
+    "thickness": ("Thickness (m)", "Axial thickness of the disc (m)."),
+    "outer_diameter": ("Outer diameter (m)", "Outer diameter of the ring (m)."),
+    "inner_diameter": ("Inner diameter (m)", "Inner bore diameter of the ring (m)."),
+    "packed_length": ("Packed length (m)", "Stowed length inside the airframe (m)."),
+    "packed_diameter": ("Packed diameter (m)", "Stowed diameter inside the airframe (m)."),
+    "chute_diameter": ("Chute diameter (m)", "Deployed canopy diameter (m)."),
+    "chute_cd": ("Chute Cd", "Parachute drag coefficient (flat sheet ~0.75, dome ~1.5)."),
+    "strip_length": ("Strip length (m)", "Length of the streamer strip (m)."),
+    "strip_width": ("Strip width (m)", "Width of the streamer strip (m)."),
+    "cord_length": ("Cord length (m)", "Deployed shock-cord length (m)."),
+    "propellant_mass": ("Propellant mass (kg)", "Propellant mass burned during thrust (kg)."),
+}
+
+# Per-part-type one-line description used for the CONSTRUCTION KIT button tooltips.
+PART_TOOLTIPS = {
+    "body": "Cylindrical body tube - the main airframe section.",
+    "nose": "Nose cone at the top of the airframe.",
+    "transition": "Conical transition / reducer between two body diameters.",
+    "boattail": "Tail cone at the base that narrows toward the aft end.",
+    "fins": "Fin set (4-fin plus configuration).",
+    "launch_lug": "Small tube on the body side that rides the launch rod.",
+    "rail_button": "Tiny standoff button that rides a launch rail.",
+    "coupler": "Internal tube coupler joining two airframe sections.",
+    "bulkhead": "Internal disc / pressure bulkhead.",
+    "centering_ring": "Internal ring centring an inner tube in the airframe.",
+    "avionics": "Internal avionics bay / payload section.",
+    "ballast": "Internal mass added to trim the centre of gravity.",
+    "parachute": "Packed parachute for recovery.",
+    "streamer": "Packed streamer for recovery.",
+    "shock_cord": "Packed shock cord tethering the sections.",
+    "motor": "Rocket motor / reload.",
+}
+
+# CONSTRUCTION KIT layout: ordered sections of part-type keys.
+KIT_SECTIONS = [
+    ("AERODYNAMIC", ["body", "nose", "transition", "boattail", "fins",
+                     "launch_lug", "rail_button"]),
+    ("INTERNAL", ["coupler", "bulkhead", "centering_ring", "avionics", "ballast"]),
+    ("RECOVERY", ["parachute", "streamer", "shock_cord"]),
+    ("PROPULSION", ["motor"]),
+]
+
+# Types whose length physically extends the airframe (nose tip to tail). Internal
+# parts, side lugs/buttons and recovery gear must NOT inflate the total length.
+AIRFRAME_TYPES = {"body", "nose", "transition", "boattail", "motor"}
+
+# Types drawn with the "internal" style (dashed edge, low alpha, inside the body).
+INTERNAL_TYPES = {"coupler", "bulkhead", "centering_ring", "avionics", "ballast",
+                  "parachute", "streamer", "shock_cord"}
+
 # ---------------------------------------------------------------------------
 # Theme
 # ---------------------------------------------------------------------------
@@ -590,8 +652,13 @@ class PartEditDialog(QDialog):
         for key, value in part_data.items():
             if key == "type":
                 continue
-            self.inputs[key] = QLineEdit(str(value))
-            self.layout.addRow(f"{key.replace('_', ' ').capitalize()}:", self.inputs[key])
+            field = QLineEdit(str(value))
+            label, tip = PART_KEY_HELP.get(
+                key, (key.replace('_', ' ').capitalize(), ""))
+            if tip:
+                field.setToolTip(tip)
+            self.inputs[key] = field
+            self.layout.addRow(f"{label}:", field)
 
         if part_data.get("type") == "motor":
             self.motor_btn = QPushButton("BROWSE MOTORS")
@@ -711,9 +778,25 @@ class MissionControl(QWidget):
 
         # Templates for the builder
         self.templates = {
+            # External / aerodynamic
             "body": {"type": "body", "name": "Body Tube", "mass": 0.1, "length": 0.3, "diameter": 0.04, "y_offset": 0.0},
             "nose": {"type": "nose", "name": "Nose Cone", "mass": 0.05, "length": 0.15, "diameter": 0.04, "y_offset": 0.3},
+            "transition": {"type": "transition", "name": "Transition", "mass": 0.03, "length": 0.05, "fore_diameter": 0.04, "aft_diameter": 0.06, "y_offset": 0.3},
+            "boattail": {"type": "boattail", "name": "Boat Tail", "mass": 0.02, "length": 0.04, "fore_diameter": 0.04, "aft_diameter": 0.025, "y_offset": 0.0},
             "fins": {"type": "fins", "name": "Fins", "mass": 0.05, "points": "(0,0), (0.1,0), (0.07,0.08), (0,0.08)", "y_offset": 0.0},
+            "launch_lug": {"type": "launch_lug", "name": "Launch Lug", "mass": 0.003, "length": 0.03, "diameter": 0.006, "y_offset": 0.12},
+            "rail_button": {"type": "rail_button", "name": "Rail Button", "mass": 0.002, "height": 0.008, "y_offset": 0.08},
+            # Internal
+            "coupler": {"type": "coupler", "name": "Coupler", "mass": 0.02, "length": 0.05, "diameter": 0.038, "y_offset": 0.28},
+            "bulkhead": {"type": "bulkhead", "name": "Bulkhead", "mass": 0.01, "thickness": 0.005, "diameter": 0.038, "y_offset": 0.2},
+            "centering_ring": {"type": "centering_ring", "name": "Centering Ring", "mass": 0.008, "thickness": 0.004, "outer_diameter": 0.038, "inner_diameter": 0.03, "y_offset": 0.05},
+            "avionics": {"type": "avionics", "name": "Avionics Bay", "mass": 0.08, "length": 0.08, "diameter": 0.038, "y_offset": 0.16},
+            "ballast": {"type": "ballast", "name": "Ballast", "mass": 0.05, "length": 0.02, "diameter": 0.03, "y_offset": 0.26},
+            # Recovery
+            "parachute": {"type": "parachute", "name": "Parachute", "mass": 0.03, "packed_length": 0.06, "packed_diameter": 0.035, "chute_diameter": 0.74, "chute_cd": 1.5, "y_offset": 0.18},
+            "streamer": {"type": "streamer", "name": "Streamer", "mass": 0.01, "packed_length": 0.04, "packed_diameter": 0.03, "strip_length": 1.0, "strip_width": 0.1, "y_offset": 0.18},
+            "shock_cord": {"type": "shock_cord", "name": "Shock Cord", "mass": 0.015, "packed_length": 0.05, "packed_diameter": 0.02, "cord_length": 3.0, "y_offset": 0.22},
+            # Propulsion
             "motor": {"type": "motor", "name": "Motor", "mass": 0.05, "length": 0.1, "diameter": 0.029, "motor_id": "None", "motor_file": "AeroTech_F40W.csv", "y_offset": 0.01},
         }
 
@@ -758,17 +841,36 @@ class MissionControl(QWidget):
         self.controls.setFixedWidth(320)
         self.control_layout = QVBoxLayout(self.controls)
 
-        # Button grid (built ONCE, added once)
+        # Construction kit: labelled sections, each with a small button grid.
+        # 13+ flat buttons are unusable, so group them and wrap in a scroll area
+        # that caps the kit height and leaves room for the ACTIVE COMPONENTS list.
+        self.kit_scroll = QScrollArea()
+        self.kit_scroll.setWidgetResizable(True)
+        self.kit_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.kit_scroll.setMaximumHeight(300)
+        self.kit_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.btn_container = QWidget()
-        self.btn_grid = QGridLayout(self.btn_container)
-        self.btn_grid.setContentsMargins(0, 5, 0, 5)
-        self.btn_grid.setSpacing(8)
-        for i, p_type in enumerate(self.templates.keys()):
-            btn = QPushButton(f"+ {p_type.capitalize()}")
-            btn.setMinimumHeight(40)
-            btn.clicked.connect(lambda checked, t=p_type: self.add_component(t))
-            self.btn_grid.addWidget(btn, i // 2, i % 2)
-        self.control_layout.addWidget(self.btn_container)
+        kit_layout = QVBoxLayout(self.btn_container)
+        kit_layout.setContentsMargins(0, 5, 6, 5)
+        kit_layout.setSpacing(4)
+        for section, keys in KIT_SECTIONS:
+            sec_lbl = QLabel(section)
+            sec_lbl.setStyleSheet(f"color: {FAINT}; font-size: 10px; font-weight: bold; "
+                                  f"margin-top: 4px;")
+            kit_layout.addWidget(sec_lbl)
+            grid = QGridLayout()
+            grid.setSpacing(6)
+            present = [k for k in keys if k in self.templates]
+            for i, p_type in enumerate(present):
+                name = self.templates[p_type].get("name", p_type.capitalize())
+                btn = QPushButton(f"+ {name}")
+                btn.setMinimumHeight(34)
+                btn.setToolTip(PART_TOOLTIPS.get(p_type, name))
+                btn.clicked.connect(lambda checked, t=p_type: self.add_component(t))
+                grid.addWidget(btn, i // 2, i % 2)
+            kit_layout.addLayout(grid)
+        self.kit_scroll.setWidget(self.btn_container)
+        self.control_layout.addWidget(self.kit_scroll)
 
         lbl = QLabel("ACTIVE COMPONENTS")
         lbl.setStyleSheet(f"color: {FAINT}; font-weight: bold; margin-top: 6px;")
@@ -951,6 +1053,33 @@ class MissionControl(QWidget):
             self.update_schematic()
             self.refresh_sidebar()
 
+    @staticmethod
+    def _part_length(part):
+        """Axial (vertical) extent of a part in metres, from whichever key it uses.
+
+        Parts don't all carry a 'length' key: bulkheads/rings use 'thickness',
+        rail buttons use 'height', recovery gear uses 'packed_length'. Returns 0.0
+        for parts with no meaningful axial extent."""
+        for k in ("length", "packed_length", "thickness", "height"):
+            if k in part:
+                try:
+                    return float(part[k])
+                except (ValueError, TypeError):
+                    return 0.0
+        return 0.0
+
+    @staticmethod
+    def _part_width(part, default=0.04):
+        """Radial extent (diameter) of a part in metres, from whichever key it uses."""
+        for k in ("diameter", "packed_diameter", "outer_diameter",
+                  "aft_diameter", "fore_diameter"):
+            if k in part:
+                try:
+                    return float(part[k])
+                except (ValueError, TypeError):
+                    return default
+        return default
+
     def _body_radius(self):
         for p in self.rocket_components:
             if p.get("type") == "body":
@@ -983,14 +1112,15 @@ class MissionControl(QWidget):
             ptype = part.get("type")
             try:
                 y0 = float(part.get("y_offset", 0))
-                w = float(part.get("diameter", 0.04))
-                h = float(part.get("length", 0))
             except (ValueError, TypeError):
                 continue
+            h = self._part_length(part)
+            w = self._part_width(part)
             max_height = max(max_height, y0 + h)
 
-            # zorder stacks body lowest, then nose/fins, motor on top so the
-            # innermost part is drawn - and clicked - on top of what contains it.
+            # zorder stacks the body lowest (1), then external/internal parts (2),
+            # motor on top (3) so the innermost part is drawn - and clicked - on
+            # top of whatever contains it. The smallest-area pick then wins.
             shape = None
             if ptype == "body":
                 shape = Rectangle((-w / 2, y0), w, h, color=CARD, ec=BLUE, lw=2,
@@ -998,6 +1128,25 @@ class MissionControl(QWidget):
             elif ptype == "nose":
                 shape = Polygon([[-w / 2, y0], [w / 2, y0], [0, y0 + h]],
                                 color=BLUE, ec='white', lw=1, picker=True, zorder=2)
+            elif ptype in ("transition", "boattail"):
+                try:
+                    df = float(part.get("fore_diameter", w))
+                    da = float(part.get("aft_diameter", w))
+                except (ValueError, TypeError):
+                    df, da = w, w
+                # y grows toward the nose, so 'fore' is the top edge, 'aft' the bottom.
+                shape = Polygon([[-da / 2, y0], [da / 2, y0],
+                                 [df / 2, y0 + h], [-df / 2, y0 + h]],
+                                color=CARD, ec=BLUE, lw=2, picker=True, zorder=2)
+            elif ptype == "launch_lug":
+                # Small tube against the right-hand body wall.
+                shape = Rectangle((r_body, y0), max(w, 0.003), h,
+                                  color="#52525b", ec=MUTED, lw=1, picker=True, zorder=2)
+            elif ptype == "rail_button":
+                # Tiny square standoff on the body wall (uses 'height').
+                s = h if h > 0 else 0.008
+                shape = Rectangle((r_body, y0), s, s,
+                                  color=MUTED, ec=TEXT, lw=0.5, picker=True, zorder=2)
             elif ptype == "fins":
                 try:
                     raw = parse_fin_points(part["points"])
@@ -1012,6 +1161,18 @@ class MissionControl(QWidget):
                     ax.add_patch(poly)
                 max_height = max(max_height, y0 + max(p[1] for p in raw))
                 continue
+            elif ptype in INTERNAL_TYPES:
+                # Internal parts: dashed edge, low alpha, drawn inside the body
+                # outline so the user can see they sit within the airframe.
+                col = {
+                    "avionics": AMBER, "ballast": RED, "coupler": MUTED,
+                    "bulkhead": MUTED, "centering_ring": MUTED,
+                    "parachute": GREEN, "streamer": GREEN, "shock_cord": GREEN,
+                }.get(ptype, MUTED)
+                iw = min(w, 2 * r_body) if r_body > 0 else w
+                ih = h if h > 0 else 0.004
+                shape = Rectangle((-iw / 2, y0), iw, ih, facecolor=col, alpha=0.28,
+                                  ec=col, ls='--', lw=1.2, picker=True, zorder=2)
             elif ptype == "motor":
                 shape = Rectangle((-w / 2, max(y0, 0.0)), w, h,
                                   color="#52525b", ec=MUTED, lw=1, picker=True, zorder=3)
@@ -1043,12 +1204,15 @@ class MissionControl(QWidget):
                 m = 0.0
             try:
                 y0 = float(p.get("y_offset", 0))
-                length = float(p.get("length", 0))
             except (ValueError, TypeError):
-                y0, length = 0.0, 0.0
+                y0 = 0.0
+            length = self._part_length(p)
             dry += m
             moment += m * (y0 + length / 2)
-            top = max(top, y0 + length)
+            # Only airframe parts extend the overall length; internal gear, side
+            # lugs/buttons and recovery packing must not inflate "Total length".
+            if p.get("type") in AIRFRAME_TYPES:
+                top = max(top, y0 + length)
             if p.get("type") == "motor":
                 try:
                     prop += float(p.get("propellant_mass", 0))
@@ -1083,45 +1247,71 @@ class MissionControl(QWidget):
         r = self._body_radius()
         d = 2 * r
 
+        # Accumulate (CNa, CP-from-nose) terms and take the normal-force-weighted
+        # mean. With no transitions/boattails this reduces exactly to the previous
+        # nose(+fins) result.
         # Nose cone: CNa = 2, CP at ~2/3 of the nose length from the tip (conical)
         cn_nose = 2.0
         x_nose = (2.0 / 3.0) * nose_len
-        if fins is None or d <= 0:
-            return x_nose
+        terms = [(cn_nose, x_nose)]
 
-        try:
-            pts = parse_fin_points(fins.get("points", ""))
-            fin_y0 = float(fins.get("y_offset", 0))
-        except Exception:
-            return x_nose
+        # Fin set (unchanged geometry; skipped rather than early-returning so
+        # transition terms can still contribute).
+        fin_term = None
+        if fins is not None and d > 0:
+            try:
+                pts = parse_fin_points(fins.get("points", ""))
+                fin_y0 = float(fins.get("y_offset", 0))
+                xs = [p[0] for p in pts]
+                span = max(xs)
+                root_ys = [p[1] for p in pts if p[0] <= 0.05 * span]
+                tip_ys = [p[1] for p in pts if p[0] >= 0.95 * span]
+                cr = (max(root_ys) - min(root_ys)) if root_ys else 0.0
+                ct = (max(tip_ys) - min(tip_ys)) if tip_ys else 0.0
+                if span > 0 and root_ys and cr + ct > 0:
+                    root_le_from_nose = total_len - (fin_y0 + max(root_ys))
+                    tip_le_y = max(tip_ys) if tip_ys else min(p[1] for p in pts)
+                    m_sweep = max(0.0, max(root_ys) - tip_le_y)
+                    n_fins = 4
+                    l_mid = float(np.hypot(span, m_sweep + ct / 2.0 - cr / 2.0))
+                    cn_fins = (1 + r / (span + r)) * (4.0 * n_fins * (span / d) ** 2) / \
+                        (1 + np.sqrt(1 + (2.0 * l_mid / (cr + ct)) ** 2))
+                    x_fins = root_le_from_nose + (m_sweep / 3.0) * (cr + 2 * ct) / (cr + ct) + \
+                        (1.0 / 6.0) * ((cr + ct) - (cr * ct) / (cr + ct))
+                    fin_term = (cn_fins, x_fins)
+            except Exception:
+                fin_term = None
+        if fin_term is not None:
+            terms.append(fin_term)
 
-        xs = [p[0] for p in pts]
-        span = max(xs)
-        if span <= 0:
-            return x_nose
-        # Root chord: vertical extent near the body (x ~ 0); tip chord near max span.
-        root_ys = [p[1] for p in pts if p[0] <= 0.05 * span]
-        tip_ys = [p[1] for p in pts if p[0] >= 0.95 * span]
-        if not root_ys:
-            return x_nose
-        cr = max(root_ys) - min(root_ys)
-        ct = (max(tip_ys) - min(tip_ys)) if tip_ys else 0.0
-        if cr + ct <= 0:
-            return x_nose
+        # Transitions and boattails (conical Barrowman body term). Reference
+        # diameter d is the body diameter; 'fore' faces the nose, 'aft' the tail.
+        if d > 0:
+            for p in self.rocket_components:
+                if p.get("type") not in ("transition", "boattail"):
+                    continue
+                try:
+                    df = float(p.get("fore_diameter"))
+                    da = float(p.get("aft_diameter"))
+                    L = self._part_length(p)
+                    y0 = float(p.get("y_offset", 0))
+                except (ValueError, TypeError):
+                    continue
+                if df <= 0 or da <= 0 or df == da:
+                    continue
+                cn_t = 2.0 * ((da / d) ** 2 - (df / d) ** 2)
+                x0 = total_len - (y0 + L)  # forward end distance from the nose tip
+                ratio = df / da
+                denom = 1.0 - ratio ** 2
+                if abs(denom) < 1e-9:
+                    continue
+                x_t = x0 + (L / 3.0) * (1.0 + (1.0 - ratio) / denom)
+                terms.append((cn_t, x_t))
 
-        # Builder y grows upward from the tail; convert to distance-from-nose.
-        root_le_from_nose = total_len - (fin_y0 + max(root_ys))
-        tip_le_y = max(tip_ys) if tip_ys else min(p[1] for p in pts)
-        m_sweep = max(0.0, max(root_ys) - tip_le_y)  # leading-edge sweep along the body axis
-
-        n_fins = 4
-        l_mid = float(np.hypot(span, m_sweep + ct / 2.0 - cr / 2.0))  # mid-chord line
-        cn_fins = (1 + r / (span + r)) * (4.0 * n_fins * (span / d) ** 2) / \
-            (1 + np.sqrt(1 + (2.0 * l_mid / (cr + ct)) ** 2))
-        x_fins = root_le_from_nose + (m_sweep / 3.0) * (cr + 2 * ct) / (cr + ct) + \
-            (1.0 / 6.0) * ((cr + ct) - (cr * ct) / (cr + ct))
-
-        return float((cn_nose * x_nose + cn_fins * x_fins) / (cn_nose + cn_fins))
+        cn_sum = sum(c for c, _ in terms)
+        if cn_sum == 0:
+            return None
+        return float(sum(c * x for c, x in terms) / cn_sum)
 
     def _fin_planform_area(self):
         """Shoelace area of one fin polygon, or None."""
@@ -1169,10 +1359,30 @@ class MissionControl(QWidget):
                 if p.get("motor_file"):
                     self.env_inputs["Motor File"].setText(str(p["motor_file"]))
                 break
+        # Parachute part -> recovery config (canopy diameter + drag coefficient)
+        chute = next((p for p in self.rocket_components
+                      if p.get("type") == "parachute"), None)
+        chute_msg = ""
+        if chute is not None:
+            try:
+                cd_dia = float(chute.get("chute_diameter", 0))
+                if cd_dia > 0:
+                    self.rec_inputs["Chute Dia (m)"].setText(f"{cd_dia:.3f}")
+            except (ValueError, TypeError):
+                pass
+            try:
+                cd_cd = float(chute.get("chute_cd", 0))
+                if cd_cd > 0:
+                    self.rec_inputs["Chute Cd"].setText(f"{cd_cd:.3f}")
+            except (ValueError, TypeError):
+                pass
+            chute_msg = " Parachute pushed to recovery config."
         self.update_stability_gauge()
         extra = " CP estimated via Barrowman." if cp is not None else \
             " Add a nose cone for a CP estimate."
-        self.set_status(f"Flight config updated from builder (mass, length, CG, diameter).{extra}", GREEN)
+        self.set_status(
+            f"Flight config updated from builder (mass, length, CG, diameter)."
+            f"{extra}{chute_msg}", GREEN)
 
     # ==================================================================
     # FLIGHT TAB
